@@ -1,0 +1,18 @@
+{
+  "id": "balanced_brackets",
+  "title": "Balanced Brackets",
+  "prompt": "Write a function that checks whether a string of brackets is balanced. Supported bracket pairs are (), [], and {}. Return True if every opening bracket has a matching, correctly nested closing bracket, and False otherwise. A string with no brackets at all is considered balanced.",
+  "function_name": "is_balanced",
+  "function_signature": "def is_balanced(s: str) -> bool:",
+  "category": "data-structures",
+  "difficulty": "medium",
+  "test_cases": [
+    {"input": ["()"], "expected": true},
+    {"input": ["([{}])"], "expected": true},
+    {"input": ["(]"], "expected": false},
+    {"input": [""], "expected": true},
+    {"input": ["(("], "expected": false},
+    {"input": ["{[()]}"], "expected": true},
+    {"input": ["([)]"], "expected": false}
+  ]
+}

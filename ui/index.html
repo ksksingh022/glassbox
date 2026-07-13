@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Glassbox — Harness Visualizer</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <div>
+      <h1>Glassbox</h1>
+      <p>watch the request travel through every harness primitive</p>
+    </div>
+  </div>
+  <div class="run-controls">
+    <select id="kata-select" aria-label="kata"></select>
+    <label class="attempts">max attempts
+      <input id="max-attempts" type="number" min="1" max="6" value="3" />
+    </label>
+    <button id="solve-btn">
+      <span class="btn-dot"></span> Solve
+    </button>
+  </div>
+</header>
+
+<div class="status-strip">
+  <span id="status-pill" class="pill idle">idle</span>
+  <span class="meta" id="kata-meta"></span>
+  <span class="spacer"></span>
+  <span class="attempt-counter" id="attempt-counter">attempt <b>—</b></span>
+</div>
+
+<main class="layout">
+  <section class="panel stage-panel">
+    <div class="panel-head">
+      <h2>Harness</h2>
+      <span class="hint">the ring is the harness · the core is the model · click any node for its input/output</span>
+    </div>
+    <div class="stage">
+      <svg id="board" viewBox="0 0 1000 680" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flow">
+        <defs>
+          <radialGradient id="coreGrad" cx="50%" cy="42%" r="65%">
+            <stop offset="0%" stop-color="#9db4ff"/>
+            <stop offset="55%" stop-color="#5f74e6"/>
+            <stop offset="100%" stop-color="#3b45a8"/>
+          </radialGradient>
+          <radialGradient id="haloGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="rgba(140,170,255,0.55)"/>
+            <stop offset="100%" stop-color="rgba(140,170,255,0)"/>
+          </radialGradient>
+          <linearGradient id="packetGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#bcd0ff"/>
+            <stop offset="100%" stop-color="#6ea8fe"/>
+          </linearGradient>
+        </defs>
+
+        <g id="conns"></g>
+
+        <!-- central model core -->
+        <g id="model" class="model idle">
+          <circle class="core-halo" cx="500" cy="340" r="118" fill="url(#haloGrad)"></circle>
+          <circle class="core-ring r1" cx="500" cy="340" r="92"></circle>
+          <circle class="core-ring r2" cx="500" cy="340" r="80"></circle>
+          <circle class="core-body" cx="500" cy="340" r="72" fill="url(#coreGrad)"></circle>
+          <foreignObject x="418" y="300" width="164" height="90">
+            <div xmlns="http://www.w3.org/1999/xhtml" class="core-label">
+              <div class="core-title">MODEL</div>
+              <div class="core-sub" id="model-name">swappable LLM</div>
+              <div class="core-stat" id="model-stat"></div>
+            </div>
+          </foreignObject>
+        </g>
+
+        <g id="nodes"></g>
+
+        <g id="packet" class="packet hidden">
+          <circle class="packet-halo" r="17"></circle>
+          <circle class="packet-core" r="7" fill="url(#packetGrad)"></circle>
+        </g>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw idle"></i> idle</span>
+      <span><i class="sw active"></i> active</span>
+      <span><i class="sw done"></i> done</span>
+      <span><i class="sw warn"></i> failed</span>
+      <span><i class="sw retry"></i> retry loop</span>
+      <span class="tracer-note">every edge is instrumented by the Tracer (P7)</span>
+    </div>
+  </section>
+
+  <aside class="panel log-panel">
+    <div class="panel-head"><h2>Live trace</h2><span class="hint" id="log-count"></span></div>
+    <div id="log"><div class="empty">No events yet — pick a kata and hit Solve.</div></div>
+  </aside>
+
+  <section class="panel result-panel">
+    <div class="panel-head"><h2>Result</h2></div>
+    <div id="result"><div class="empty">Attempts and verdict appear here.</div></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

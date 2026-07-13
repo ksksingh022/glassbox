@@ -1,0 +1,16 @@
+{
+  "id": "reverse_string",
+  "title": "Reverse String",
+  "prompt": "Write a function that reverses a string and returns the result. This is a warm-up kata.",
+  "function_name": "reverse_string",
+  "function_signature": "def reverse_string(s: str) -> str:",
+  "category": "warmup",
+  "difficulty": "easy",
+  "test_cases": [
+    {"input": ["hello"], "expected": "olleh"},
+    {"input": [""], "expected": ""},
+    {"input": ["a"], "expected": "a"},
+    {"input": ["racecar"], "expected": "racecar"},
+    {"input": ["Glassbox"], "expected": "xobssalG"}
+  ]
+}

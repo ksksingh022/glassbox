@@ -1,0 +1,25 @@
+{
+  "id": "regex_matching",
+  "title": "Regular Expression Matching",
+  "prompt": "Given an input string s and a pattern p, implement regular expression matching with support for '.' and '*' where:\n\n- '.' matches any single character.\n- '*' matches zero or more of the preceding element.\n\nThe matching should cover the entire input string (not partial). This is LeetCode #10 — a hard problem; get the backtracking/DP boundary conditions right.",
+  "function_name": "is_match",
+  "function_signature": "def is_match(s: str, p: str) -> bool:",
+  "category": "algorithms",
+  "difficulty": "hard",
+  "test_cases": [
+    {"input": ["aa", "a"], "expected": false},
+    {"input": ["aa", "a*"], "expected": true},
+    {"input": ["ab", ".*"], "expected": true},
+    {"input": ["aab", "c*a*b"], "expected": true},
+    {"input": ["mississippi", "mis*is*p*."], "expected": false},
+    {"input": ["mississippi", "mis*is*ip*."], "expected": true},
+    {"input": ["", ""], "expected": true},
+    {"input": ["", ".*"], "expected": true},
+    {"input": ["", "a*"], "expected": true},
+    {"input": ["aaa", "a*a"], "expected": true},
+    {"input": ["aaa", "aaaa"], "expected": false},
+    {"input": ["ab", ".*c"], "expected": false},
+    {"input": ["a", ""], "expected": false},
+    {"input": ["abcd", "d*"], "expected": false}
+  ]
+}

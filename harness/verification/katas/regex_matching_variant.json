@@ -1,0 +1,29 @@
+{
+  "id": "regex_matching_variant",
+  "title": "Custom Regex Matching (+)",
+  "prompt": "This is a variant of regular expression matching with support for three operators (note: this is NOT the standard LeetCode problem — there is an extra operator, so a memorized textbook solution will not directly work):\n\n- '.' matches any single character.\n- '*' matches zero or more of the preceding element.\n- '+' matches one or more of the preceding element (this one is non-standard — get its boundary conditions right).\n\nGiven an input string s and a pattern p built from literal characters plus these operators, return True if the pattern matches the entire string s (not a partial match), False otherwise.",
+  "function_name": "is_match",
+  "function_signature": "def is_match(s: str, p: str) -> bool:",
+  "category": "algorithms",
+  "difficulty": "hard",
+  "test_cases": [
+    {"input": ["aa", "a"], "expected": false},
+    {"input": ["aa", "a*"], "expected": true},
+    {"input": ["ab", ".*"], "expected": true},
+    {"input": ["aab", "c*a*b"], "expected": true},
+    {"input": ["", ""], "expected": true},
+    {"input": ["", ".*"], "expected": true},
+    {"input": ["", "a*"], "expected": true},
+    {"input": ["", "a+"], "expected": false},
+    {"input": ["", ".+"], "expected": false},
+    {"input": ["a", "a+"], "expected": true},
+    {"input": ["aaa", "a+"], "expected": true},
+    {"input": ["aab", "a+b"], "expected": true},
+    {"input": ["b", "a+b"], "expected": false},
+    {"input": ["aaa", "a+a"], "expected": true},
+    {"input": ["aaa", "a+aa"], "expected": true},
+    {"input": ["ab", ".+"], "expected": true},
+    {"input": ["abcd", "d*"], "expected": false},
+    {"input": ["mississippi", "mis+is+ip*."], "expected": true}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "fizzbuzz_variant",
+  "title": "FizzBuzz Variant",
+  "prompt": "Write a function that takes an integer n and returns a label string using these custom rules (in this exact order of concatenation): if n is divisible by 3, include 'Fizz'; if divisible by 5, include 'Buzz'; if divisible by 7, include 'Bang'. Concatenate all that apply, in that order (e.g. n=105 -> 'FizzBuzzBang'). If none apply, return str(n).",
+  "function_name": "fizzbuzz_variant",
+  "function_signature": "def fizzbuzz_variant(n: int) -> str:",
+  "category": "conditionals",
+  "difficulty": "easy",
+  "test_cases": [
+    {"input": [1], "expected": "1"},
+    {"input": [2], "expected": "2"},
+    {"input": [3], "expected": "Fizz"},
+    {"input": [5], "expected": "Buzz"},
+    {"input": [7], "expected": "Bang"},
+    {"input": [15], "expected": "FizzBuzz"},
+    {"input": [21], "expected": "FizzBang"},
+    {"input": [35], "expected": "BuzzBang"},
+    {"input": [105], "expected": "FizzBuzzBang"}
+  ]
+}
