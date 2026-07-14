@@ -19,6 +19,105 @@ Full build plan: [`HARNESS_PLAN.md`](HARNESS_PLAN.md). Design decisions with rat
 | P7 | Tracing | [`harness/tracing/`](harness/tracing/) |
 | P8 | UI (basic) | [`ui/`](ui/) |
 
+## System design
+
+### Component architecture
+
+```mermaid
+flowchart TD
+    subgraph Browser
+        UI["ui/app.js<br/>animated graph + inspector"]
+    end
+
+    UI -- "POST /solve" --> API
+    API -. "GET /trace-stream/:id (SSE)" .-> UI
+
+    subgraph "api/main.py (FastAPI)"
+        API["/solve · /trace-stream/:id · /runs/:id"]
+    end
+
+    API -- "asyncio.to_thread" --> ORCH
+
+    subgraph "harness/ (vanilla Python, no framework)"
+        ORCH["Orchestrator (P6)<br/>outer attempt loop + inner tool-call loop"]
+        INSTR["InstructionBuilder (P2)"]
+        PROV["LLMProvider (P1)<br/>OpenAICompatProvider · FakeProvider"]
+        TOOLS["6 Tools (P3)<br/>run_tests · run_code · trace_execution<br/>lookup_docs · analyze_complexity · algorithm_hint"]
+        GATE["ApprovalGate (P3)"]
+        SBX["SandboxExecutor (P4)<br/>SubprocessSandbox"]
+        ORACLE["TestOracle (P5)"]
+        TRACER["Tracer (P7)<br/>sync spans, async subscribers"]
+    end
+
+    ORCH --> INSTR
+    ORCH --> PROV
+    ORCH --> GATE
+    GATE --> TOOLS
+    TOOLS --> SBX
+    TOOLS --> ORACLE
+    ORCH -. "every span/event" .-> TRACER
+    TRACER -. "call_soon_threadsafe" .-> API
+
+    PROV -- "HTTPS / localhost" --> MODEL[("OpenRouter or<br/>local Ollama")]
+```
+
+**What's actually novel here** (worth leading with in an interview): the **Orchestrator is the only stateful piece**, and every primitive it calls is a thin, swappable, independently-testable class — `LLMProvider`, `SandboxExecutor`, and every `Tool` are ABCs with exactly one method each. Nothing imports a framework; `harness/` has zero dependency on FastAPI, so the entire agent logic is unit-testable (and *is* unit-tested — see `tests/`) without an HTTP server in the loop at all.
+
+### Request lifecycle — one `/solve` call, in full
+
+This is the sequence I'd actually draw on a whiteboard. It covers both loops: the **outer** attempt-retry loop (Decision: oracle precedence) and the **inner** tool-call loop (the newer function-calling addition).
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant A as FastAPI (api/main.py)
+    participant O as Orchestrator
+    participant P as LLMProvider
+    participant T as Tool (e.g. run_tests)
+    participant S as Sandbox
+    participant Or as Oracle
+    participant Tr as Tracer
+
+    B->>A: POST /solve {kata_id, max_attempts}
+    A->>A: create Tracer(run_id), bind to event loop
+    A-->>B: {run_id}  (returns immediately)
+    A->>O: asyncio.to_thread(orchestrator.solve, kata)
+    B->>A: GET /trace-stream/:run_id (SSE, opens in parallel)
+
+    loop until oracle_passed or max_attempts
+        O->>Tr: span "attempt" (attempt_no)
+        O->>Tr: span "instructions" → messages built
+        loop until model answers with no tool_calls (budget: 5)
+            O->>P: complete(messages, tools=[6 schemas])
+            P-->>O: Completion(text, tool_calls?)
+            alt model requested a tool
+                O->>T: run tool with model's arguments
+                T->>S: execute in sandbox (if run_tests/run_code/trace_execution)
+                S-->>T: ExecResult
+                T-->>O: ToolResult
+                O->>O: append assistant + tool-result messages, loop again
+            else model answered with final code
+                O->>O: break loop
+            end
+        end
+        O->>Or: run_tests(final code) — authoritative, unless model's<br/>last tool call already covered this exact code
+        Or-->>O: VerificationReport
+        O->>Tr: attempt span closes (oracle_passed, score)
+    end
+
+    O-->>A: RunResult
+    Tr-->>A: final SSE event
+    A-->>B: SSE stream closes — GET /runs/:id for the full result
+```
+
+### Concurrency model — the one genuinely tricky part
+
+`Orchestrator.solve()` is **synchronous** (blocking HTTP calls to the LLM, blocking `subprocess.run` for the sandbox) and runs inside `asyncio.to_thread(...)`, off the event loop. Meanwhile the SSE stream (`GET /trace-stream/:id`) is **async**, living on the event loop, in a *different* task than the one running the orchestrator's thread.
+
+`Tracer` is the bridge. Every `span()`/`event()` call happens synchronously, on the orchestrator's worker thread — but the SSE subscribers are `asyncio.Queue`s that only the event loop can safely push into. `Tracer.bind_loop()` stashes a reference to the event loop at run start, and every emission goes through `loop.call_soon_threadsafe(queue.put_nowait, event)` — the one call in this codebase that's actually about thread safety rather than business logic. Skip it and the UI would either deadlock or silently drop events depending on timing.
+
+A second, smaller wrinkle: a **new** SSE connection to an **already-finished** run still works, because `Tracer.subscribe()` replays `self._events` (the full history) before switching to live delivery — that's what let me debug a real production incident by reconnecting to a completed run's trace stream and reading back the exact payload that was sent to the LLM right before it failed, without reproducing anything.
+
 ## The harness visualizer
 
 The UI (`ui/`) is the point of the project: the **model sits in the center** and the **seven harness primitives ring around it**. Only the provider seam (P1) touches the model — a dotted spur — which is the whole "Agent = Model + Harness" thesis made literal. Hit **Solve** and a glowing packet travels the ring; each primitive lights up as the request passes through it, the core spins while the model is "thinking," the oracle turns red on a failed attempt, and the retry loop animates the packet back to the orchestrator for the next attempt. Every edge is instrumented by the Tracer (P7) and streamed to the page over SSE. The animation is driven by real trace events but paced with a minimum dwell per stage so even a sub-100ms run is watchable, and it holds the "thinking" state for as long as a real (slow) LLM call takes.
