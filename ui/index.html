@@ -31,6 +31,7 @@
   <span class="meta" id="kata-meta"></span>
   <span class="spacer"></span>
   <span class="attempt-counter" id="attempt-counter">attempt <b>—</b></span>
+  <span class="tool-round hidden" id="tool-round"></span>
 </div>
 
 <main class="layout">
@@ -87,7 +88,8 @@
       <span><i class="sw active"></i> active</span>
       <span><i class="sw done"></i> done</span>
       <span><i class="sw warn"></i> failed</span>
-      <span><i class="sw retry"></i> retry loop</span>
+      <span><i class="sw retry"></i> retry loop (new attempt)</span>
+      <span><i class="sw selfcheck"></i> model self-check (tool loop, same attempt)</span>
       <span class="tracer-note">every edge is instrumented by the Tracer (P7)</span>
     </div>
   </section>
@@ -98,7 +100,7 @@
   </aside>
 
   <section class="panel result-panel">
-    <div class="panel-head"><h2>Result</h2></div>
+    <div class="panel-head"><h2>Result</h2><span class="hint">expand any two attempts to compare side by side</span></div>
     <div id="result"><div class="empty">Attempts and verdict appear here.</div></div>
   </section>
 </main>

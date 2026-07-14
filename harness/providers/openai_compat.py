@@ -18,12 +18,13 @@ model, counting the retries so the harness can surface them in the trace.
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 
 import httpx
 
-from harness.models import Completion, Message
+from harness.models import Completion, Message, ToolCall, ToolSchema
 from harness.providers.base import LLMProvider
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -52,6 +53,46 @@ def looks_like_safety_verdict(text: str) -> bool:
     return len(t) <= 24 and normalized in _BARE_VERDICTS
 
 
+def _wire_message(m: Message) -> dict:
+    """`Message` -> OpenAI chat-completions wire format, including the
+    function-calling extensions (assistant `tool_calls`, `tool` role
+    results linked back via `tool_call_id`)."""
+    msg: dict = {"role": m.role, "content": m.content}
+    if m.tool_calls:
+        msg["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+            }
+            for tc in m.tool_calls
+        ]
+    if m.tool_call_id:
+        msg["tool_call_id"] = m.tool_call_id
+    return msg
+
+
+def _wire_tool_schema(t: ToolSchema) -> dict:
+    return {
+        "type": "function",
+        "function": {"name": t.name, "description": t.description, "parameters": t.parameters},
+    }
+
+
+def _parse_tool_calls(raw: list[dict] | None) -> list[ToolCall]:
+    calls = []
+    for tc in raw or []:
+        fn = tc.get("function", {})
+        args = fn.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args else {}
+            except json.JSONDecodeError:
+                args = {}
+        calls.append(ToolCall(id=tc.get("id", ""), name=fn.get("name", ""), arguments=args))
+    return calls
+
+
 class OpenAICompatProvider(LLMProvider):
     def __init__(
         self,
@@ -78,15 +119,23 @@ class OpenAICompatProvider(LLMProvider):
                 "HTTP-Referer": referer,
                 "X-Title": title,
             },
-            timeout=timeout_s,
+            # Split timeout: fail fast if the endpoint is unreachable (connect),
+            # but don't kill a genuinely slow generation mid-response (read) —
+            # a small local model doing chain-of-thought reasoning can
+            # legitimately take minutes on modest hardware.
+            timeout=httpx.Timeout(connect=10.0, read=timeout_s, write=30.0, pool=10.0),
         )
 
-    def complete(self, messages: list[Message], **kwargs) -> Completion:
+    def complete(
+        self, messages: list[Message], tools: list[ToolSchema] | None = None, **kwargs
+    ) -> Completion:
         payload = {
             "model": self._model,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": [_wire_message(m) for m in messages],
             "temperature": kwargs.get("temperature", 0.2),
         }
+        if tools:
+            payload["tools"] = [_wire_tool_schema(t) for t in tools]
 
         start = time.monotonic()
         safety_retries = 0
@@ -121,9 +170,13 @@ class OpenAICompatProvider(LLMProvider):
 
             resp.raise_for_status()
             data = resp.json()
-            text = data["choices"][0]["message"].get("content") or ""
+            message = data["choices"][0]["message"]
+            text = message.get("content") or ""
+            tool_calls = _parse_tool_calls(message.get("tool_calls"))
 
-            if looks_like_safety_verdict(text) and safety_retries < self._max_safety_retries:
+            # A tool call is never a safety-model verdict (those are always
+            # bare text), so skip that check and return immediately.
+            if not tool_calls and looks_like_safety_verdict(text) and safety_retries < self._max_safety_retries:
                 # Routed to the safety model — re-issue so a real model answers.
                 safety_retries += 1
                 time.sleep(0.2)
@@ -138,6 +191,7 @@ class OpenAICompatProvider(LLMProvider):
                 output_tokens=usage.get("completion_tokens", 0),
                 latency_ms=latency_ms,
                 safety_retries=safety_retries,
+                tool_calls=tool_calls or None,
             )
 
         # Retries exhausted (kept hitting the safety model). Return the last

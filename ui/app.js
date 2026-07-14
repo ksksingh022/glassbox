@@ -18,7 +18,9 @@ const NODES = {
 };
 const NW = 152, NH = 60;
 
-// Ring segments (clockwise) + the provider→model spur + the retry arc.
+// Ring segments (clockwise) + the provider→model spur + the outer retry arc
+// (a new attempt) + the inner tool-loop arc (the model calling another tool
+// within the SAME attempt, without a fresh Instructions build).
 const SEGMENTS = [
   ["orchestrator", "instructions"],
   ["instructions", "provider"],
@@ -28,6 +30,7 @@ const SEGMENTS = [
   ["sandbox", "oracle"],
   ["oracle", "orchestrator", "retry"],
   ["provider", "model", "spur"],
+  ["tools", "provider", "toolloop"],
 ];
 
 const conns = {}; // "a->b" -> { el, p0, p1, p2 }
@@ -39,11 +42,13 @@ function nodeCenter(id) {
 }
 
 // Control point: bow the segment outward from the center for a ring look.
+// The tool-loop arc bows INWARD instead (negative), so it visually reads as
+// a shortcut through the inside of the ring, distinct from the outer retry arc.
 function controlPoint(a, b, kind) {
   const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   const dir = { x: mid.x - CENTER.x, y: mid.y - CENTER.y };
   const len = Math.hypot(dir.x, dir.y) || 1;
-  const bow = kind === "retry" ? 78 : kind === "spur" ? 0 : 46;
+  const bow = kind === "retry" ? 78 : kind === "spur" ? 0 : kind === "toolloop" ? -55 : 46;
   return { x: mid.x + (dir.x / len) * bow, y: mid.y + (dir.y / len) * bow };
 }
 
@@ -149,7 +154,9 @@ async function travel(from, to, opts = {}) {
   if (!conn) { setPacketPos(nodeCenter(to)); return; }
 
   const isRetry = conn.el.classList.contains("retry");
+  const isToolLoop = conn.el.classList.contains("toolloop");
   packet.classList.toggle("retry", isRetry);
+  packet.classList.toggle("toolloop", isToolLoop);
   conn.el.classList.add("flowing");
   await tween(opts.dur || 470, (t) => {
     const tt = reverse ? 1 - t : t;
@@ -157,7 +164,7 @@ async function travel(from, to, opts = {}) {
   });
   conn.el.classList.remove("flowing");
   conn.el.classList.add("traveled");
-  packet.classList.remove("retry");
+  packet.classList.remove("retry", "toolloop");
 }
 
 function modelThink(on) { modelEl.classList.toggle("think", on); }
@@ -172,6 +179,14 @@ function setModelInfo(name, stat) {
 // and a slow real LLM call simply holds the "thinking" state until its ok.
 // ---------------------------------------------------------------------------
 let queue = [], waiter = null, runToken = 0;
+
+// Tool-call round tracking — an "attempt" (Python's outer retry loop) can
+// now contain several inner rounds of Provider->Tools before it finalizes
+// (the model deciding to call run_tests/trace_execution/etc. on its own).
+// Without this, every round looked identical to a fresh attempt, which is
+// what made the graph look like it was looping uncontrollably.
+let toolRoundInAttempt = 0;
+let lastToolModelInitiated = false;
 
 function pushAction(fn) {
   queue.push(fn);
@@ -348,6 +363,8 @@ function handleEvent(evt) {
       pushAction(async () => {
         const n = a.attempt_no || 1;
         setAttempt(n);
+        toolRoundInAttempt = 0;
+        setToolRound(0);
         if (n > 1) {
           setNode("orchestrator", "idle");
           await travel("oracle", "orchestrator"); // retry loop
@@ -368,8 +385,18 @@ function handleEvent(evt) {
 
     case "gen_ai.completion:started":
       pushAction(async () => {
-        setNode("instructions", "done");
-        await travel("instructions", "provider");
+        toolRoundInAttempt++;
+        setToolRound(toolRoundInAttempt);
+        if (toolRoundInAttempt === 1) {
+          // First round of this attempt: the normal Instructions -> Provider path.
+          setNode("instructions", "done");
+          await travel("instructions", "provider");
+        } else {
+          // The model is being asked again after seeing a tool result —
+          // it's coming back from Tools, not from a fresh Instructions build.
+          setNode("tools", "done");
+          await travel("tools", "provider");
+        }
         setNode("provider", "active");
         await travel("provider", "model");
         modelThink(true);
@@ -406,6 +433,8 @@ function handleEvent(evt) {
 
     case "gen_ai.tool:started":
       pushAction(async () => {
+        lastToolModelInitiated = !!a.model_initiated;
+        nodeEls.tools.classList.toggle("selfcheck", lastToolModelInitiated);
         await travel("approval", "tools");
         setNode("tools", "active");
         await dwell(120);
@@ -415,9 +444,17 @@ function handleEvent(evt) {
     case "sandbox_exec:started":
       pushAction(async () => {
         setNode("tools", "done");
+        nodeEls.sandbox.classList.toggle("selfcheck", lastToolModelInitiated);
         await travel("tools", "sandbox");
         setNode("sandbox", "exec");
       });
+      break;
+
+    case "gen_ai.tool:ok":
+      // lookup_docs / algorithm_hint / analyze_complexity never touch the
+      // sandbox — nothing else would ever mark this node "done" for them.
+      // Harmless no-op for tools that DO use the sandbox (already "done").
+      pushAction(async () => { setNode("tools", "done"); });
       break;
 
     case "verification:ok":
@@ -489,6 +526,16 @@ function setStatus(s) {
 function setAttempt(n) {
   document.getElementById("attempt-counter").innerHTML = `attempt <b>${n}</b>`;
 }
+function setToolRound(n) {
+  const el = document.getElementById("tool-round");
+  if (!el) return;
+  if (n > 1) {
+    el.textContent = `· tool round ${n}`;
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+}
 
 function escapeHtml(s) {
   return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
@@ -525,48 +572,129 @@ function renderDiff(oldText, newText) {
     `<span class="diff-line diff-${op.type}">${DIFF_MARK[op.type]} ${escapeHtml(op.text)}</span>`
   ).join("\n") + `</pre>`;
 }
+// Two-pane variant of the same diff: left pane is the old code with removed
+// lines marked red (added lines omitted — they don't exist in the old
+// version), right pane is the new code with added lines marked green
+// (removed lines omitted). Used for side-by-side compare mode.
+function renderDiffPane(oldText, newText, side) {
+  const ops = diffLines(oldText, newText);
+  const keep = side === "left" ? (t) => t !== "add" : (t) => t !== "remove";
+  return `<pre class="diff">` + ops.filter((op) => keep(op.type)).map((op) =>
+    `<span class="diff-line diff-${op.type}">${DIFF_MARK[op.type]} ${escapeHtml(op.text)}</span>`
+  ).join("\n") + `</pre>`;
+}
+
+function failCasesHtml(at) {
+  if (at.report.oracle_passed) return "";
+  return at.report.failed_cases.slice(0, 5).map((fc) => {
+    const detail = fc.error
+      ? `raised ${fc.error}`
+      : `expected ${JSON.stringify(fc.expected)} got ${JSON.stringify(fc.actual)}`;
+    return `<div class="fail-case">input=${JSON.stringify(fc.input)} — ${detail}</div>`;
+  }).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Attempt cards: collapsed by default, click to expand. At most two can be
+// expanded at once — expanding a third evicts the oldest-opened one. With
+// exactly two open, they render side by side with a direct diff between
+// those two attempts (not just each vs. its immediate predecessor).
+// ---------------------------------------------------------------------------
+let lastResult = null;
+let openAttempts = []; // attempt_no values, in the order they were opened
 
 function renderResult(result) {
   setStatus(result.passed ? "passed" : "failed");
+  lastResult = result;
+  openAttempts = [];
+  renderAttempts();
+}
+
+function toggleAttempt(attemptNo) {
+  const idx = openAttempts.indexOf(attemptNo);
+  if (idx !== -1) {
+    openAttempts.splice(idx, 1);
+  } else {
+    openAttempts.push(attemptNo);
+    if (openAttempts.length > 2) openAttempts.shift(); // cap at 2, evict oldest
+  }
+  renderAttempts();
+}
+
+function attemptRowHtml(at, prev, isOpen) {
+  const ok = at.report.oracle_passed;
+  const sr = at.completion && at.completion.safety_retries;
+  let html = `<div class="attempt ${isOpen ? "open" : ""}">
+    <div class="head" data-attempt="${at.attempt_no}">
+      <span class="head-left">
+        <span class="chev">&#9656;</span>
+        <span>Attempt ${at.attempt_no}</span>
+        ${isOpen ? (prev ? `<span class="diff-badge">diff vs attempt ${prev.attempt_no}</span>` : `<span class="diff-badge">first attempt</span>`) : ""}
+        ${sr ? ` <span style="color:var(--exec);font-size:11px">· safety-retry ×${sr}</span>` : ""}
+      </span>
+      <span class="verd ${ok ? "pass" : "fail"}">${ok ? "pass" : "fail"}</span>
+    </div>`;
+  if (isOpen) {
+    html += `<div class="attempt-body">`;
+    html += prev ? renderDiff(prev.code, at.code) : `<pre>${escapeHtml(at.code)}</pre>`;
+    html += failCasesHtml(at);
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function comparePaneHtml(at, other, side) {
+  const ok = at.report.oracle_passed;
+  const sr = at.completion && at.completion.safety_retries;
+  return `<div class="compare-pane">
+    <div class="head" data-attempt="${at.attempt_no}">
+      <span class="head-left">
+        <span class="chev">&#9662;</span>
+        <span>Attempt ${at.attempt_no}</span>
+        ${sr ? ` <span style="color:var(--exec);font-size:11px">· safety-retry ×${sr}</span>` : ""}
+      </span>
+      <span class="verd ${ok ? "pass" : "fail"}">${ok ? "pass" : "fail"}</span>
+    </div>
+    <div class="attempt-body">
+      ${renderDiffPane(side === "left" ? at.code : other.code, side === "left" ? other.code : at.code, side)}
+      ${failCasesHtml(at)}
+    </div>
+  </div>`;
+}
+
+function renderAttempts() {
+  const result = lastResult;
   const el = document.getElementById("result");
   let html =
     `<div class="verdict ${result.passed ? "pass" : "fail"}">` +
     `${result.passed ? "PASSED" : "FAILED"}` +
     `<span class="tag">${result.attempts.length} attempt(s) · ${result.total_duration_ms.toFixed(0)}ms</span></div>` +
     `<div class="attempts-grid">`;
-  result.attempts.forEach((at, idx) => {
-    const ok = at.report.oracle_passed;
-    const sr = at.completion && at.completion.safety_retries;
-    const prev = idx > 0 ? result.attempts[idx - 1] : null;
 
-    html += `<details class="attempt">
-      <summary class="head">
-        <span class="head-left">
-          <span class="chev">&#9656;</span>
-          <span>Attempt ${at.attempt_no}</span>
-          ${prev ? `<span class="diff-badge">diff vs attempt ${prev.attempt_no}</span>` : `<span class="diff-badge">first attempt</span>`}
-          ${sr ? ` <span style="color:var(--exec);font-size:11px">· safety-retry ×${sr}</span>` : ""}
-        </span>
-        <span class="verd ${ok ? "pass" : "fail"}">${ok ? "pass" : "fail"}</span>
-      </summary>
-      <div class="attempt-body">`;
+  if (openAttempts.length === 2) {
+    const [a, b] = [...openAttempts].sort((x, y) => x - y)
+      .map((n) => result.attempts.find((at) => at.attempt_no === n));
+    html += `<div class="compare-label">comparing attempt ${a.attempt_no} &rarr; attempt ${b.attempt_no}</div>`;
+    html += `<div class="compare-grid">${comparePaneHtml(a, b, "left")}${comparePaneHtml(b, a, "right")}</div>`;
+    result.attempts.forEach((at) => {
+      if (at.attempt_no === a.attempt_no || at.attempt_no === b.attempt_no) return;
+      html += attemptRowHtml(at, null, false);
+    });
+  } else {
+    result.attempts.forEach((at, idx) => {
+      const isOpen = openAttempts.includes(at.attempt_no);
+      const prev = idx > 0 ? result.attempts[idx - 1] : null;
+      html += attemptRowHtml(at, prev, isOpen);
+    });
+  }
 
-    html += prev
-      ? renderDiff(prev.code, at.code)
-      : `<pre>${escapeHtml(at.code)}</pre>`;
-
-    if (!ok) {
-      at.report.failed_cases.slice(0, 5).forEach((fc) => {
-        const detail = fc.error
-          ? `raised ${fc.error}`
-          : `expected ${JSON.stringify(fc.expected)} got ${JSON.stringify(fc.actual)}`;
-        html += `<div class="fail-case">input=${JSON.stringify(fc.input)} — ${detail}</div>`;
-      });
-    }
-    html += `</div></details>`;
-  });
   html += `</div>`;
   el.innerHTML = html;
+
+  el.querySelectorAll(".head[data-attempt]").forEach((headEl) => {
+    headEl.addEventListener("click", () => toggleAttempt(parseInt(headEl.dataset.attempt, 10)));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -594,18 +722,24 @@ function resetBoard() {
   runToken++;
   queue = []; waiter = null; logCount = 0;
   currentRunEvents = [];
+  toolRoundInAttempt = 0;
+  lastToolModelInitiated = false;
   closeModal();
   resetRing();
   setNode("orchestrator", "idle");
+  nodeEls.tools.classList.remove("selfcheck");
+  nodeEls.sandbox.classList.remove("selfcheck");
   modelThink(false);
   modelEl.classList.remove("warnflash");
   setModelInfo("swappable LLM", "");
+  packet.classList.remove("retry", "toolloop");
   packet.classList.add("hidden");
   for (const c of Object.values(conns)) c.el.classList.remove("flowing", "traveled");
   logEl.innerHTML = '<div class="empty">Connecting…</div>';
   document.getElementById("result").innerHTML = '<div class="empty">Running…</div>';
   document.getElementById("log-count").textContent = "";
   setAttempt("—");
+  setToolRound(0);
 }
 
 async function solve() {

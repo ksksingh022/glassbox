@@ -19,25 +19,35 @@ ATTEMPT: {attempt_no}
 
 Rules:
 - Implement exactly the function described below, matching its signature.
-- Respond with ONLY a single ```python fenced code block containing the function.
-- No explanation text outside the code block.
+- You have several tools available — use whichever actually help for this
+  specific problem; you don't need all of them and some problems need none:
+{tool_list}
+- When you are ready to give your final answer, respond with ONLY a single
+  ```python fenced code block containing the function — no tool call, no
+  explanation text outside the code block. That is what ends the attempt.
 """
 
 
 class InstructionBuilder:
-    def build(self, context: RunContext) -> list[Message]:
+    def build(self, context: RunContext, tool_schemas: list | None = None) -> list[Message]:
+        # Tool descriptions are generated from the same ToolSchema objects
+        # the provider uses for real function-calling, so the prompt can
+        # never drift out of sync with what's actually callable.
         kata = context.kata
+        tool_schemas = tool_schemas or []
+        tool_list = "\n".join(f"  - `{t.name}`: {t.description}" for t in tool_schemas) or "  (none offered this run)"
         messages = [
             Message(
                 role="system",
                 content=_SYSTEM_TEMPLATE.format(
-                    kata_id=kata.id, attempt_no=context.attempt_no
+                    kata_id=kata.id, attempt_no=context.attempt_no, tool_list=tool_list,
                 ),
             ),
             Message(
                 role="user",
                 content=(
-                    f"Title: {kata.title}\n\n"
+                    f"Title: {kata.title}\n"
+                    f"Category: {kata.category} · Difficulty: {kata.difficulty}\n\n"
                     f"{kata.prompt}\n\n"
                     f"Function signature:\n{kata.function_signature}"
                 ),

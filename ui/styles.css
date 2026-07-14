@@ -85,6 +85,8 @@ select:focus, input:focus { border-color: var(--accent); }
 .pill.failed { color: var(--warn); border-color: rgba(251,113,133,0.4); background: rgba(251,113,133,0.08); }
 @keyframes pulsePill { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 .attempt-counter b { color: var(--text); }
+.tool-round { color: var(--exec); font-size: 12px; }
+.tool-round.hidden { display: none; }
 
 /* ---------- layout ---------- */
 .layout {
@@ -112,8 +114,10 @@ select:focus, input:focus { border-color: var(--accent); }
 .conn { fill: none; stroke: #2a3145; stroke-width: 2.2; stroke-linecap: round; transition: stroke .3s ease; }
 .conn.spur { stroke-dasharray: 2 7; stroke: #364063; }
 .conn.retry { stroke-dasharray: 6 8; stroke: #3a2f52; }
+.conn.toolloop { stroke-dasharray: 3 5; stroke: #3d3418; }
 .conn.flowing { stroke: var(--accent); stroke-width: 3; filter: drop-shadow(0 0 6px rgba(110,168,254,0.7)); animation: dash 0.7s linear infinite; }
 .conn.retry.flowing { stroke: var(--accent2); filter: drop-shadow(0 0 6px rgba(167,139,250,0.7)); }
+.conn.toolloop.flowing { stroke: var(--exec); filter: drop-shadow(0 0 6px rgba(251,191,36,0.7)); }
 .conn.traveled { stroke: #3b465f; }
 @keyframes dash { to { stroke-dashoffset: -30; } }
 
@@ -174,6 +178,13 @@ select:focus, input:focus { border-color: var(--accent); }
 .packet-halo { fill: rgba(120,160,255,0.28); }
 .packet.retry .packet-core { filter: drop-shadow(0 0 8px rgba(190,160,255,0.95)); }
 .packet.retry .packet-halo { fill: rgba(180,150,255,0.28); }
+.packet.toolloop .packet-core { filter: drop-shadow(0 0 8px rgba(251,191,36,0.95)); }
+.packet.toolloop .packet-halo { fill: rgba(251,191,36,0.28); }
+
+/* self-check: the MODEL chose to call this tool mid-attempt, distinct from
+   the harness's own final authoritative run_tests check on the same nodes */
+.node.selfcheck.active .box, .node.selfcheck.exec .box { stroke: var(--exec); }
+.node.selfcheck.active, .node.selfcheck.exec { filter: drop-shadow(0 0 12px rgba(251,191,36,0.55)); }
 
 /* legend */
 .legend {
@@ -187,6 +198,7 @@ select:focus, input:focus { border-color: var(--accent); }
 .sw.done { background: #10231c; border-color: var(--ok); }
 .sw.warn { background: #2a1620; border-color: var(--warn); }
 .sw.retry { background: #241d38; border-color: var(--accent2); }
+.sw.selfcheck { background: #2a2312; border-color: var(--exec); }
 .tracer-note { margin-left: auto; color: var(--faint); font-style: italic; }
 
 /* ---------- log ---------- */
@@ -281,37 +293,38 @@ select:focus, input:focus { border-color: var(--accent); }
 .verdict.fail { color: var(--warn); }
 .attempts-grid { display: flex; flex-direction: column; gap: 10px; }
 
-/* Attempt cards are collapsed by default (<details>) — a failed run's full
-   code dump doesn't need to be on screen until someone asks for it. */
+/* Attempt cards are collapsed by default — a failed run's full code dump
+   doesn't need to be on screen until someone asks for it. At most two can
+   be open at once (JS-enforced); with exactly two open they render in
+   .compare-grid instead of this stacked list. */
 .attempt {
   border: 1px solid var(--border); border-radius: 10px; background: var(--panel2); overflow: hidden;
 }
-.attempt .head {
+.attempt .head, .compare-pane .head {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 10px 12px; font-weight: 640; font-size: 13px; cursor: pointer; list-style: none;
+  padding: 10px 12px; font-weight: 640; font-size: 13px; cursor: pointer;
   user-select: none;
 }
-.attempt .head::-webkit-details-marker { display: none; }
-.attempt .head:hover { background: rgba(255,255,255,0.02); }
+.attempt .head:hover, .compare-pane .head:hover { background: rgba(255,255,255,0.02); }
 .head-left { display: flex; align-items: center; gap: 8px; }
 .chev { display: inline-block; font-size: 10px; color: var(--muted); transition: transform 0.15s ease; }
-.attempt[open] .chev { transform: rotate(90deg); }
+.attempt.open .chev { transform: rotate(90deg); }
 .diff-badge {
   font-size: 10px; color: var(--muted); background: var(--idle); border: 1px solid var(--border);
   border-radius: 5px; padding: 1px 7px; font-weight: 500; text-transform: none;
 }
-.attempt .verd { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 8px; border-radius: 6px; }
-.attempt .verd.pass { color: var(--ok); background: rgba(52,211,153,0.12); }
-.attempt .verd.fail { color: var(--warn); background: rgba(251,113,133,0.12); }
+.attempt .verd, .compare-pane .verd { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 8px; border-radius: 6px; }
+.attempt .verd.pass, .compare-pane .verd.pass { color: var(--ok); background: rgba(52,211,153,0.12); }
+.attempt .verd.fail, .compare-pane .verd.fail { color: var(--warn); background: rgba(251,113,133,0.12); }
 .attempt-body { padding: 0 12px 12px; border-top: 1px solid var(--border); padding-top: 12px; }
-.attempt pre {
+.attempt pre, .compare-pane pre {
   margin: 0; background: #0b0e15; border: 1px solid var(--border); border-radius: 8px;
   padding: 10px; overflow-x: auto; font-size: 12px; line-height: 1.5;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #d6dcec;
 }
 
-/* Diff view: red = removed vs. the previous attempt, green = added. */
-.attempt pre.diff { padding: 6px 0; }
+/* Diff view: red = removed, green = added. */
+.attempt pre.diff, .compare-pane pre.diff { padding: 6px 0; }
 .diff-line { display: block; padding: 1px 10px; white-space: pre-wrap; }
 .diff-line.diff-same { color: #8993ac; }
 .diff-line.diff-add { color: #b9f5d3; background: rgba(52,211,153,0.14); }
@@ -319,6 +332,21 @@ select:focus, input:focus { border-color: var(--accent); }
 
 .fail-case { color: var(--warn); font-size: 12px; margin-top: 6px; font-family: ui-monospace, monospace; }
 .empty { color: var(--faint); font-size: 13px; padding: 6px 2px; }
+
+/* ---------- side-by-side compare mode (exactly 2 attempts expanded) ---------- */
+.compare-label {
+  font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 0 2px;
+}
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.compare-pane {
+  border: 1px solid var(--accent); border-radius: 10px; background: var(--panel2); overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(110,168,254,0.15);
+}
+.compare-pane .attempt-body { padding: 0 10px 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+@media (max-width: 700px) {
+  .compare-grid { grid-template-columns: 1fr; }
+}
 
 /* ---------- responsive ---------- */
 @media (max-width: 980px) {

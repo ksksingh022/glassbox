@@ -27,8 +27,13 @@ from harness.providers.base import LLMProvider
 from harness.providers.fake import FakeProvider
 from harness.providers.openai_compat import OpenAICompatProvider
 from harness.sandbox.executor import SubprocessSandbox
+from harness.tools.algorithm_hint import AlgorithmHintTool
 from harness.tools.base import ApprovalGate
+from harness.tools.complexity_analysis import AnalyzeComplexityTool
+from harness.tools.docs_lookup import DocsLookupTool
+from harness.tools.run_code import RunCodeTool
 from harness.tools.run_tests import RunTestsTool
+from harness.tools.trace_execution import TraceExecutionTool
 from harness.tracing.tracer import Tracer
 from harness.verification.katas_loader import load, load_all
 from harness.verification.oracle import TestOracle
@@ -62,10 +67,15 @@ def _build_provider() -> LLMProvider:
         # OpenAICompatProvider, just pointed at localhost with no real key.
         # This is the second, genuinely non-OpenRouter wire target proving
         # the provider seam is a real seam (Decision #3).
+        # Local inference on modest hardware (especially a "thinking" model
+        # emitting a long chain-of-thought) can genuinely take minutes per
+        # call — a much longer read timeout than OpenRouter's cloud default,
+        # overridable via OLLAMA_TIMEOUT_S.
         return OpenAICompatProvider(
             api_key=os.environ.get("OLLAMA_API_KEY", "ollama"),
             model=os.environ.get("OLLAMA_MODEL", "qwen3-vl:8b-instruct"),
             base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+            timeout_s=float(os.environ.get("OLLAMA_TIMEOUT_S", "300")),
         )
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -173,9 +183,13 @@ async def solve(request: Request):
 
     gate = ApprovalGate(tracer=tracer, policy=os.environ.get("APPROVAL_POLICY", "auto"))
     run_tests_tool = RunTestsTool(sandbox=_SANDBOX, oracle=_ORACLE, tracer=tracer)
+    run_code_tool = RunCodeTool(sandbox=_SANDBOX, tracer=tracer)
+    trace_execution_tool = TraceExecutionTool(sandbox=_SANDBOX, tracer=tracer)
     orchestrator = Orchestrator(
-        provider=_PROVIDER, run_tests_tool=run_tests_tool, approval_gate=gate,
-        tracer=tracer, instruction_builder=InstructionBuilder(),
+        provider=_PROVIDER, run_tests_tool=run_tests_tool, run_code_tool=run_code_tool,
+        trace_execution_tool=trace_execution_tool, lookup_docs_tool=DocsLookupTool(),
+        analyze_complexity_tool=AnalyzeComplexityTool(), algorithm_hint_tool=AlgorithmHintTool(),
+        approval_gate=gate, tracer=tracer, instruction_builder=InstructionBuilder(),
     )
 
     async def _run() -> None:

@@ -14,13 +14,37 @@ from typing import Any, Literal
 # P1 — Provider seam
 # ---------------------------------------------------------------------------
 
-Role = Literal["system", "user", "assistant"]
+Role = Literal["system", "user", "assistant", "tool"]
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A tool invocation the model requested (from a Completion), or the
+    same invocation echoed back into an assistant Message's history."""
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ToolSchema:
+    """Describes a callable tool to the model, in provider-agnostic form.
+    `OpenAICompatProvider` translates this to the OpenAI function-calling
+    wire format; a different provider could translate it differently."""
+    name: str
+    description: str
+    parameters: dict[str, Any]  # JSON Schema for the tool's arguments
 
 
 @dataclass(frozen=True)
 class Message:
     role: Role
     content: str
+    # Set on an assistant message that requested tool calls (empty content
+    # is normal in that case). Set on a "tool" message's tool_call_id to
+    # link a tool result back to the request that produced it.
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +58,9 @@ class Completion:
     # OpenRouter routed it to a moderation/safety model that returned a
     # bare "User Safety: safe" verdict instead of a real answer (item 2).
     safety_retries: int = 0
+    # Populated instead of (or alongside empty) `text` when the model chose
+    # to call a tool rather than answer directly.
+    tool_calls: list[ToolCall] | None = None
 
 
 # ---------------------------------------------------------------------------

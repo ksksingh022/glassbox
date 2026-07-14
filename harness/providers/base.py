@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from harness.models import Completion, Message
+from harness.models import Completion, Message, ToolSchema
 
 
 class LLMProvider(ABC):
     @abstractmethod
-    def complete(self, messages: list[Message], **kwargs) -> Completion:
+    def complete(
+        self, messages: list[Message], tools: list[ToolSchema] | None = None, **kwargs
+    ) -> Completion:
+        # If `tools` is given, the model may respond with `Completion.tool_calls`
+        # instead of (or with empty) `text` — a provider that doesn't support
+        # function calling should just ignore `tools` and answer with text.
         ...
