@@ -2,22 +2,44 @@
 
 **Agent = Model + Harness.** The model is a swappable commodity behind one interface (`LLMProvider`). Everything else — instructions, tools, sandbox, verification, orchestration, tracing, UI — is the harness, built by hand in vanilla Python so the whole thing is visible instead of a black box.
 
-This is **Phase 1**: a single agent solves a coding kata end-to-end — read problem → write code → execute in a sandbox → verify against a deterministic oracle → retry on failure → report — with every step traced live to a browser UI over SSE.
+All 14 primitives from [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md) are implemented. A single agent solves a coding kata end-to-end — read problem → write code → execute in a sandbox → verify against a deterministic oracle → retry on failure → report — **or** a Planner→Coder→Tester subagent team solves the same kata with structured failure feedback, a bounded context budget, on-demand skill loading, and cross-session memory. Every step is traced live to a browser UI over SSE, in either mode.
 
-Full build plan: [`HARNESS_PLAN.md`](HARNESS_PLAN.md). Design decisions with rationale: [`DECISIONS.md`](DECISIONS.md).
+Full build plan: [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md). Design decisions with rationale: [`DECISIONS.md`](DECISIONS.md).
 
-## Primitives in Phase 1
+## All 14 primitives
 
-| # | Primitive | File |
-|---|---|---|
-| P1 | Provider seam | [`harness/providers/`](harness/providers/) |
-| P2 | Instructions | [`harness/instructions.py`](harness/instructions.py) |
-| P3 | Tools + approval gate | [`harness/tools/`](harness/tools/) |
-| P4 | Sandbox | [`harness/sandbox/executor.py`](harness/sandbox/executor.py) |
-| P5 | Verification (oracle) | [`harness/verification/oracle.py`](harness/verification/oracle.py) |
-| P6 | Orchestrator (loop + retry) | [`harness/orchestrator.py`](harness/orchestrator.py) |
-| P7 | Tracing | [`harness/tracing/`](harness/tracing/) |
-| P8 | UI (basic) | [`ui/`](ui/) |
+| # | Primitive | Phase | File |
+|---|---|---|---|
+| P1 | Provider seam | 1 | [`harness/providers/`](harness/providers/) |
+| P2 | Instructions | 1 | [`harness/instructions.py`](harness/instructions.py) |
+| P3 | Tools + approval gate | 1 | [`harness/tools/`](harness/tools/) |
+| P4 | Sandbox | 1 | [`harness/sandbox/executor.py`](harness/sandbox/executor.py) |
+| P5 | Verification (oracle) | 1 | [`harness/verification/oracle.py`](harness/verification/oracle.py) |
+| P6 | Orchestration (single- and multi-agent) | 1 / 2 | [`harness/orchestrator.py`](harness/orchestrator.py), [`harness/orchestrator_multi.py`](harness/orchestrator_multi.py) |
+| P7 | Tracing (full OTel-flavored conformance + cost) | 1 / 3 | [`harness/tracing/`](harness/tracing/), [`harness/costs.py`](harness/costs.py) |
+| P8 | UI (a fixed flowchart with real loop-back edges + a narrated story feed + History dashboard) | 1 / 3 | [`ui/`](ui/) |
+| P9 | History (per-session attempt state) | 2 | [`harness/context/history.py`](harness/context/history.py) |
+| P10 | Context delivery (structured failure feedback) | 2 | [`harness/context/failure_formatter.py`](harness/context/failure_formatter.py) |
+| P11 | Context management (trimming/compaction) | 2 | [`harness/context/context_manager.py`](harness/context/context_manager.py) |
+| P12 | Subagents (planner / coder / tester) | 2 | [`harness/subagents/`](harness/subagents/), [`harness/tool_loop.py`](harness/tool_loop.py) |
+| P13 | Skills (on-demand SKILL.md loading) | 3 | [`skills/`](skills/), [`harness/skills/loader.py`](harness/skills/loader.py) |
+| P14 | Durable state + memory (cross-session attempt log + recall) | 3 | [`harness/memory/store.py`](harness/memory/store.py) |
+
+`POST /solve {mode: "single" | "multi"}` picks which orchestrator runs — see [DECISIONS.md #9](DECISIONS.md) for why both exist rather than one replacing the other.
+
+### Multi-agent flow (P12)
+
+```mermaid
+flowchart LR
+    O["Orchestrator<br/>(attempt-retry loop)"] --> PL["Planner<br/>problem → step plan, no code"]
+    PL --> CO["Coder<br/>plan + skills → code<br/>(ToolCallLoop, same 6 tools)"]
+    CO --> TE["Tester<br/>oracle (authoritative) +<br/>edge cases (advisory)"]
+    TE -- "pass" --> DONE(("done"))
+    TE -- "fail (< 2x)" --> CO
+    TE -- "fail (2x in a row)" --> PL
+```
+
+Each subagent call is a `tracer.span("subagent", ...)` carrying only a **distilled** `SubagentResult` (plan steps / code / verdict) back to the orchestrator — never the raw message transcript it used internally (see DECISIONS.md #9-#12 and the plan's explicit "#1 thing people get wrong with subagents" warning).
 
 ## System design
 
@@ -120,7 +142,7 @@ A second, smaller wrinkle: a **new** SSE connection to an **already-finished** r
 
 ## The harness visualizer
 
-The UI (`ui/`) is the point of the project: the **model sits in the center** and the **seven harness primitives ring around it**. Only the provider seam (P1) touches the model — a dotted spur — which is the whole "Agent = Model + Harness" thesis made literal. Hit **Solve** and a glowing packet travels the ring; each primitive lights up as the request passes through it, the core spins while the model is "thinking," the oracle turns red on a failed attempt, and the retry loop animates the packet back to the orchestrator for the next attempt. Every edge is instrumented by the Tracer (P7) and streamed to the page over SSE. The animation is driven by real trace events but paced with a minimum dwell per stage so even a sub-100ms run is watchable, and it holds the "thinking" state for as long as a real (slow) LLM call takes.
+The UI (`ui/`) is the point of the project: **one fixed flowchart, drawn once per run**, not redrawn per attempt. Two earlier designs both got this wrong — a ring around a central model core made every attempt retrace the same positions (no way to tell which retry was live), and a "one row per attempt" list flattened the loop structure into repeated boxes instead of showing it as a loop. The current design draws the harness as a real flowchart with real loop-back edges: a purple arrow carries the packet from Oracle back up to the top on a retry, a blue arrow carries it from Tester straight back to Coder on a same-plan retry (no replan), and an amber arrow carries it from wherever the model is being asked again (a tool-calling round, the Tester's edge-case sweep) back up to Provider. Each loop edge has a live counter badge (`retry ×2`, `same-plan retry ×1`, `model asked again ×3`) instead of a separate node per occurrence. Alongside the flowchart, the **Story** panel narrates the run in plain English ("Retrying — attempt 2, with the previous failure fed back into the prompt", "Tester ran the official oracle — every case passed") instead of a raw event log — the goal is that a stranger can watch a small quantized model solve a hard problem and understand *why* it worked: which mistake the harness caught, what feedback it gave, and how many tries it took. The narration is grouped by attempt (current expanded, past collapsed), and the full raw trace is still one click away per attempt via a "show raw trace" toggle. Every node/edge/story-line is instrumented by the Tracer (P7) and streamed to the page over SSE; click-to-inspect on any node shows every real call to that primitive across the whole run, most recent first, each labeled with which attempt it happened in.
 
 ## Run locally
 
@@ -158,6 +180,8 @@ Run tests:
 pytest tests/ -v
 ```
 
+In the UI, the **mode selector** next to the kata picker redraws the flowchart's node sequence: `single agent` shows Orchestrator→Instructions→Provider→Approval→Tools→Sandbox→Oracle (Phase 1), `multi agent (planner/coder/tester)` shows Planner→Coder→Provider→Approval→Tools→Sandbox→Tester→Oracle instead — Provider/Approval/Tools/Sandbox/Oracle land at the exact same y-position in both layouts, since they're genuinely shared substrate both flows call through. The **History** tab reads `GET /stats` + `GET /history`, backed by the SQLite store at `data/glassbox.db` (gitignored — created on first run).
+
 ## The retry story
 
 `binary_search` is the kata most likely to need a second attempt (classic off-by-one). With `FakeProvider` this is scripted deterministically: attempt 1 uses `<` in the loop condition (misses the last element), attempt 2 fixes it to `<=`. Pick "Binary Search" in the UI and click Solve to watch it fail then pass, with the structured failure (`expected 5 got -1`) visibly fed back into attempt 2's prompt.
@@ -172,4 +196,10 @@ Six, in [`harness/verification/katas/`](harness/verification/katas/): `reverse_s
 
 ## Deployment
 
-Not yet deployed — Phase 1's exit criteria include a Railway/Vercel deploy; this session covers the local build. `api/main.py` serves both the FastAPI backend and the static UI (`/ui`) from one process, which fits a single Railway service.
+Not yet deployed — the plan's exit criteria for both phases include a Railway/Vercel deploy; this covers the local build for Phase 1 through Phase 3, verified end-to-end in a browser preview (single-agent run, multi-agent run with the escalation/skill/memory story, and the History dashboard). `api/main.py` serves both the FastAPI backend and the static UI (`/ui`) from one process, which fits a single Railway service. Durable memory (P14) is SQLite on local disk — Railway's disk is ephemeral, so a real deploy needs the Postgres/Supabase swap noted as explicitly out of scope in [DECISIONS.md #15](DECISIONS.md).
+
+## What's honestly reduced scope in this pass
+
+- **Deployment.** Everything above runs and is verified locally; no Railway/Vercel/Supabase deploy yet (see above).
+- **P14 is SQLite only** (Phase 3a). Postgres/Supabase (3b) isn't done.
+- **Skill/memory events have no dedicated flowchart node.** `skill_loaded`, `memory_write`, and `memory_recall` (P13/P14) narrate in the Story panel with full attrs on click, same as every other event, but don't get their own animated node the way Planner/Coder/Tester do.

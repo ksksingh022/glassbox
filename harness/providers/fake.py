@@ -8,6 +8,7 @@ retry story (plan §3.5) is demonstrable without live network access.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -108,22 +109,65 @@ _SOLUTIONS: dict[str, list[str]] = {
     ],
 }
 
+# Deliberately generic, kata-agnostic edge-case inputs a "tester" would
+# propose — enough to demonstrate the advisory-failure path (Decision #5)
+# without depending on any one kata's internals. `binary_search`'s scripted
+# fixed solution handles all of these fine, so this never flips a run's
+# pass/fail — only ever produces advisory text, exactly as designed.
+_EDGE_CASES: dict[str, list[list]] = {
+    "binary_search": [[[], 1], [[5], 5], [[1, 2, 3], 100]],
+    "reverse_string": [[""], ["a"]],
+    "balanced_brackets": [[""], ["((("]],
+    "merge_intervals": [[[]], [[[1, 1]]]],
+}
+
 _KATA_TAG = re.compile(r"KATA_ID:\s*(\S+)")
 _ATTEMPT_TAG = re.compile(r"ATTEMPT:\s*(\d+)")
+_ROLE_TAG = re.compile(r"ROLE:\s*(\S+)")
+
+_PLANNER_PLAN = (
+    "1. Restate the function signature and what a correct return value looks like.\n"
+    "2. Identify edge cases (empty input, single element, boundary values).\n"
+    "3. Implement the core logic.\n"
+    "4. Mentally trace through 2-3 examples before finalizing.\n"
+)
 
 
 class FakeProvider(LLMProvider):
-    """No network calls. Reads `KATA_ID:`/`ATTEMPT:` tags that
-    `InstructionBuilder` embeds in the system message and returns a
-    scripted code response wrapped in a ```python fenced block."""
+    """No network calls. Reads `KATA_ID:`/`ATTEMPT:`/`ROLE:` tags that
+    `InstructionBuilder` (Phase 1) or the Planner/Coder/Tester subagents
+    (Phase 2) embed in the system message, and returns a scripted response
+    matching that role — a kata-agnostic plan for `planner`, the same
+    scripted fail-then-pass code for `coder` (or untagged Phase 1 calls),
+    and a small JSON edge-case list for `tester`."""
 
     def complete(self, messages: list[Message], **kwargs) -> Completion:
         start = time.monotonic()
         blob = "\n".join(m.content for m in messages)
         kata_match = _KATA_TAG.search(blob)
         attempt_match = _ATTEMPT_TAG.search(blob)
+        role_match = _ROLE_TAG.search(blob)
         kata_id = kata_match.group(1) if kata_match else ""
         attempt_no = int(attempt_match.group(1)) if attempt_match else 1
+        role = role_match.group(1) if role_match else "coder"
+
+        if role == "planner":
+            latency_ms = (time.monotonic() - start) * 1000
+            return Completion(
+                text=_PLANNER_PLAN, model_name="fake/scripted-v1",
+                input_tokens=len(blob.split()), output_tokens=len(_PLANNER_PLAN.split()),
+                latency_ms=max(latency_ms, 1.0),
+            )
+
+        if role == "tester":
+            edge_cases = _EDGE_CASES.get(kata_id, [])
+            text = json.dumps(edge_cases)
+            latency_ms = (time.monotonic() - start) * 1000
+            return Completion(
+                text=text, model_name="fake/scripted-v1",
+                input_tokens=len(blob.split()), output_tokens=len(text.split()),
+                latency_ms=max(latency_ms, 1.0),
+            )
 
         versions = _SOLUTIONS.get(kata_id, ["def solution():\n    pass\n"])
         code = versions[min(attempt_no - 1, len(versions) - 1)]

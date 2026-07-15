@@ -21,18 +21,25 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from harness.instructions import InstructionBuilder
+from harness.memory.store import AttemptStore
 from harness.models import Kata, RunResult
 from harness.orchestrator import Orchestrator
+from harness.orchestrator_multi import MultiAgentOrchestrator
 from harness.providers.base import LLMProvider
 from harness.providers.fake import FakeProvider
 from harness.providers.openai_compat import OpenAICompatProvider
 from harness.sandbox.executor import SubprocessSandbox
+from harness.skills.loader import SkillLoader
+from harness.subagents.coder import CoderSubagent
+from harness.subagents.planner import PlannerSubagent
+from harness.subagents.tester import TesterSubagent
 from harness.tools.algorithm_hint import AlgorithmHintTool
 from harness.tools.base import ApprovalGate
 from harness.tools.complexity_analysis import AnalyzeComplexityTool
 from harness.tools.docs_lookup import DocsLookupTool
 from harness.tools.run_code import RunCodeTool
 from harness.tools.run_tests import RunTestsTool
+from harness.tools.schemas import RUN_TESTS_SCHEMA
 from harness.tools.trace_execution import TraceExecutionTool
 from harness.tracing.tracer import Tracer
 from harness.verification.katas_loader import load, load_all
@@ -91,6 +98,12 @@ def _build_provider() -> LLMProvider:
 _PROVIDER = _build_provider()
 _SANDBOX = SubprocessSandbox()
 _ORACLE = TestOracle()
+_SKILL_LOADER = SkillLoader()
+# Durable memory (P14) — a real file on disk so history survives a process
+# restart, unlike `_RUNS` below. Railway's disk is ephemeral (see plan
+# §5.2 / §6); this is Phase 3a scope (SQLite) only, documented in
+# DECISIONS.md rather than silently limited.
+_MEMORY = AttemptStore()
 
 # ---------------------------------------------------------------------------
 # In-memory run registry (Railway disk/process is ephemeral in Phase 1 —
@@ -161,11 +174,60 @@ def list_katas():
     return [_kata_summary(k) for k in load_all().values()]
 
 
+def _build_single_agent_orchestrator(tracer: Tracer, gate: ApprovalGate) -> Orchestrator:
+    run_tests_tool = RunTestsTool(sandbox=_SANDBOX, oracle=_ORACLE, tracer=tracer)
+    run_code_tool = RunCodeTool(sandbox=_SANDBOX, tracer=tracer)
+    trace_execution_tool = TraceExecutionTool(sandbox=_SANDBOX, tracer=tracer)
+    return Orchestrator(
+        provider=_PROVIDER, run_tests_tool=run_tests_tool, run_code_tool=run_code_tool,
+        trace_execution_tool=trace_execution_tool, lookup_docs_tool=DocsLookupTool(),
+        analyze_complexity_tool=AnalyzeComplexityTool(), algorithm_hint_tool=AlgorithmHintTool(),
+        approval_gate=gate, tracer=tracer, instruction_builder=InstructionBuilder(),
+    )
+
+
+def _build_multi_agent_orchestrator(tracer: Tracer, gate: ApprovalGate, run_id: str) -> MultiAgentOrchestrator:
+    # The Coder gets the same run_tests tool as the single-agent orchestrator
+    # (so its ToolCallLoop can self-check mid-attempt) but oracle precedence
+    # (Decision #5) is enforced by the Tester's own authoritative run_tests
+    # call, not by the Coder's optional one.
+    run_tests_tool = RunTestsTool(sandbox=_SANDBOX, oracle=_ORACLE, tracer=tracer)
+    run_code_tool = RunCodeTool(sandbox=_SANDBOX, tracer=tracer)
+    registry = {"run_tests": (run_tests_tool, RUN_TESTS_SCHEMA)}
+    return MultiAgentOrchestrator(
+        planner=PlannerSubagent(provider=_PROVIDER, tracer=tracer),
+        coder=CoderSubagent(provider=_PROVIDER, registry=registry, tracer=tracer, approval_gate=gate),
+        tester=TesterSubagent(
+            provider=_PROVIDER, run_tests_tool=run_tests_tool, run_code_tool=run_code_tool,
+            tracer=tracer, approval_gate=gate,
+        ),
+        tracer=tracer, skill_loader=_SKILL_LOADER, memory=_MEMORY, session_id=run_id,
+    )
+
+
+def _record_single_agent_attempts(kata: Kata, run_id: str, result: RunResult) -> None:
+    for record in result.attempts:
+        failure_reason = None
+        if not record.report.oracle_passed and record.report.failed_cases:
+            fc = record.report.failed_cases[0]
+            failure_reason = fc.error or f"input={fc.input!r} expected={fc.expected!r} got={fc.actual!r}"
+        _MEMORY.record_attempt(
+            kata_id=kata.id, kata_category=kata.category, session_id=run_id,
+            attempt_no=record.attempt_no, passed=record.report.oracle_passed,
+            duration_ms=0.0,
+            tokens_used=record.completion.input_tokens + record.completion.output_tokens,
+            trace_id=run_id, failure_reason=failure_reason,
+        )
+
+
 @app.post("/solve")
 async def solve(request: Request):
     body = await request.json()
     kata_id = body.get("kata_id")
     max_attempts = int(body.get("max_attempts", 3))
+    mode = body.get("mode", "single")
+    if mode not in ("single", "multi"):
+        raise HTTPException(status_code=400, detail="mode must be 'single' or 'multi'")
     if not kata_id:
         raise HTTPException(status_code=400, detail="kata_id is required")
 
@@ -182,14 +244,9 @@ async def solve(request: Request):
     tracer.bind_loop(asyncio.get_event_loop())
 
     gate = ApprovalGate(tracer=tracer, policy=os.environ.get("APPROVAL_POLICY", "auto"))
-    run_tests_tool = RunTestsTool(sandbox=_SANDBOX, oracle=_ORACLE, tracer=tracer)
-    run_code_tool = RunCodeTool(sandbox=_SANDBOX, tracer=tracer)
-    trace_execution_tool = TraceExecutionTool(sandbox=_SANDBOX, tracer=tracer)
-    orchestrator = Orchestrator(
-        provider=_PROVIDER, run_tests_tool=run_tests_tool, run_code_tool=run_code_tool,
-        trace_execution_tool=trace_execution_tool, lookup_docs_tool=DocsLookupTool(),
-        analyze_complexity_tool=AnalyzeComplexityTool(), algorithm_hint_tool=AlgorithmHintTool(),
-        approval_gate=gate, tracer=tracer, instruction_builder=InstructionBuilder(),
+    orchestrator = (
+        _build_multi_agent_orchestrator(tracer, gate, run_id)
+        if mode == "multi" else _build_single_agent_orchestrator(tracer, gate)
     )
 
     async def _run() -> None:
@@ -197,6 +254,13 @@ async def solve(request: Request):
         try:
             result = await asyncio.to_thread(orchestrator.solve, kata, max_attempts)
             entry.result = result
+            # MultiAgentOrchestrator records each attempt to memory itself
+            # (it needs the recall hint mid-run); the single-agent path has
+            # no such need internally, so it's recorded here instead, once
+            # the run is done — still "every attempt, from either
+            # orchestrator, is recorded" (plan §5.2).
+            if mode == "single":
+                _record_single_agent_attempts(kata, run_id, result)
         except Exception as exc:  # noqa: BLE001 — surfaced to the client, not swallowed
             entry.error = str(exc)
             tracer.finish()
@@ -204,7 +268,7 @@ async def solve(request: Request):
     task = asyncio.create_task(_run())
     _RUNS[run_id] = _RunEntry(tracer=tracer, task=task)
 
-    return {"run_id": run_id, "kata_id": kata_id}
+    return {"run_id": run_id, "kata_id": kata_id, "mode": mode}
 
 
 @app.get("/trace-stream/{run_id}")
@@ -232,6 +296,16 @@ def get_run(run_id: str):
     if entry.result is None:
         return {"status": "running"}
     return {"status": "done", "result": dataclasses.asdict(entry.result)}
+
+
+@app.get("/history")
+def get_history(limit: int = 50):
+    return _MEMORY.recent(limit=limit)
+
+
+@app.get("/stats")
+def get_stats():
+    return _MEMORY.stats()
 
 
 def _json(obj) -> str:

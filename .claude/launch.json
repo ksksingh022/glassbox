@@ -4,7 +4,7 @@
     {
       "name": "glassbox-api",
       "runtimeExecutable": "bash",
-      "runtimeArgs": ["-c", "cd /Users/kuldeepsingh/Documents/glassbox-harness && source .venv/bin/activate && LLM_PROVIDER=fake uvicorn api.main:app --host 0.0.0.0 --port 8000"],
+      "runtimeArgs": ["-c", "cd /Users/kuldeepsingh/Documents/glassbox-harness && source .venv/bin/activate && uvicorn api.main:app --env-file .env --host 0.0.0.0 --port 8000"],
       "port": 8000
     }
   ]

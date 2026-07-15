@@ -170,3 +170,55 @@ class RunResult:
     passed: bool
     attempts: list[AttemptRecord]
     total_duration_ms: float
+
+
+# ---------------------------------------------------------------------------
+# P12 — Subagents
+# ---------------------------------------------------------------------------
+
+SubagentRole = Literal["planner", "coder", "tester"]
+
+
+@dataclass(frozen=True)
+class SubagentTask:
+    """Input to a `Subagent.run()` call. Every field a role doesn't need is
+    just left at its default — a single shared shape is simpler than one
+    dataclass per role, and the Orchestrator building it stays uniform."""
+    kata: Kata
+    attempt_no: int = 1
+    plan_steps: list[str] = field(default_factory=list)
+    previous_plan: list[str] = field(default_factory=list)  # set only on escalation
+    code: str = ""
+    failure_feedback: str | None = None
+    skill_context: list[str] = field(default_factory=list)
+    memory_hint: str | None = None
+
+
+@dataclass(frozen=True)
+class SubagentResult:
+    """Output of a `Subagent.run()` call — DISTILLED, never a raw
+    transcript (the parent orchestrator's context must stay small no
+    matter how many tool calls or tokens a subagent burned internally).
+    `completion` is the Coder's single final answer (already just text +
+    metadata, not a transcript) — kept so the parent can build an
+    `AttemptRecord` without re-deriving it."""
+    role: SubagentRole
+    plan_steps: list[str] = field(default_factory=list)
+    code: str = ""
+    tools_used: list[str] = field(default_factory=list)
+    completion: "Completion | None" = None
+    report: "VerificationReport | None" = None
+    advisory_failures: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# P13 — Skills
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Skill:
+    name: str
+    description: str
+    triggers: list[str]
+    content: str

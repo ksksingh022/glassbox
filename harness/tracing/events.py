@@ -21,6 +21,11 @@ SpanKind = Literal[
     "sandbox_exec",
     "verification",
     "run",
+    # Phase 2/3 additions
+    "subagent",     # P12 — planner/coder/tester span
+    "context",      # P11 — ContextManager.fit() budget math
+    "skill",        # P13 — a SKILL.md loaded into a subagent's context
+    "memory",       # P14 — a durable attempt-log write or a recall hint
 ]
 
 

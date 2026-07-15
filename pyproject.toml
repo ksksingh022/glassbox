@@ -16,6 +16,16 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# `TesterSubagent` (harness/subagents/tester.py) matches pytest's default
+# `Test*` collection heuristic when imported into a test file; it has an
+# `__init__`, so pytest correctly skips it with a warning rather than
+# error — harmless, filtered here rather than renaming a harness primitive
+# to dodge a test-runner default.
+filterwarnings = ["ignore::pytest.PytestCollectionWarning"]
 
 [tool.setuptools]
-packages = ["harness", "harness.providers", "harness.tools", "harness.sandbox", "harness.verification", "harness.tracing", "api"]
+packages = [
+    "harness", "harness.providers", "harness.tools", "harness.sandbox",
+    "harness.verification", "harness.tracing", "harness.context",
+    "harness.subagents", "harness.skills", "harness.memory", "api",
+]

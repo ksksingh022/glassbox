@@ -2,95 +2,162 @@
 const SVGNS = "http://www.w3.org/2000/svg";
 
 // ---------------------------------------------------------------------------
-// Layout — the harness ring wraps around the model core at (500,340).
+// Flowchart: ONE persistent diagram per run (not redrawn per attempt). Loops
+// are real loop-back edges with live counters — a retry travels the purple
+// "retry" edge back up to the top, a same-plan retry travels a shorter blue
+// edge, and the model being asked again mid-attempt (tool-calling, or the
+// Tester's edge-case sweep) travels the amber "tool loop" edge back up to
+// Provider. This is what a ring (repeats the same path, no back-edges) and
+// per-attempt lanes (flattens the loop into repeated rows) both failed to
+// show: the loop *structure* itself.
 // ---------------------------------------------------------------------------
-const CENTER = { x: 500, y: 340 };
-const MODEL_R = 72;
-
-const NODES = {
-  orchestrator: { x: 500, y: 78,  title: "Orchestrator",  tag: "loop + retry", p: "P6" },
-  instructions: { x: 830, y: 168, title: "Instructions",  tag: "prompt build", p: "P2" },
-  provider:     { x: 908, y: 340, title: "Provider seam", tag: "LLM client",   p: "P1" },
-  approval:     { x: 830, y: 512, title: "Approval gate", tag: "run_tests",    p: "P3" },
-  tools:        { x: 500, y: 602, title: "Tools",         tag: "run_tests",    p: "P3" },
-  sandbox:      { x: 170, y: 512, title: "Sandbox",       tag: "subprocess",   p: "P4" },
-  oracle:       { x: 92,  y: 340, title: "Oracle",        tag: "verify",       p: "P5" },
+const NODE_META = {
+  orchestrator: { title: "Orchestrator", tag: "loop + retry", p: "P6" },
+  instructions: { title: "Instructions", tag: "prompt build", p: "P2" },
+  planner: { title: "Planner", tag: "step plan", p: "P12" },
+  coder: { title: "Coder", tag: "plan → code", p: "P12" },
+  provider: { title: "Provider seam", tag: "LLM client", p: "P1" },
+  approval: { title: "Approval gate", tag: "run_tests", p: "P3" },
+  tools: { title: "Tools", tag: "run_tests", p: "P3" },
+  sandbox: { title: "Sandbox", tag: "subprocess", p: "P4" },
+  tester: { title: "Tester", tag: "oracle + edges", p: "P12" },
+  oracle: { title: "Oracle", tag: "verify", p: "P5" },
 };
-const NW = 152, NH = 60;
+const ORDER_SINGLE = ["orchestrator", "instructions", "provider", "approval", "tools", "sandbox", "oracle"];
+const ORDER_MULTI = ["planner", "coder", "provider", "approval", "tools", "sandbox", "tester", "oracle"];
+// Nodes the model can be asked FROM as the first call of a fresh context
+// (a straight main-path edge into Provider). Any other source (Tools on a
+// tool-loop round, Tester's edge-case call) travels the loop-back edge.
+const MAIN_PATH_INTO_PROVIDER = new Set(["instructions", "planner", "coder"]);
 
-// Ring segments (clockwise) + the provider→model spur + the outer retry arc
-// (a new attempt) + the inner tool-loop arc (the model calling another tool
-// within the SAME attempt, without a fresh Instructions build).
-const SEGMENTS = [
-  ["orchestrator", "instructions"],
-  ["instructions", "provider"],
-  ["provider", "approval"],
-  ["approval", "tools"],
-  ["tools", "sandbox"],
-  ["sandbox", "oracle"],
-  ["oracle", "orchestrator", "retry"],
-  ["provider", "model", "spur"],
-  ["tools", "provider", "toolloop"],
-];
+const CX = 470, TOP = 60, ROW_H = 106, NW = 220, NH = 58, BOARD_W = 1020;
 
-const conns = {}; // "a->b" -> { el, p0, p1, p2 }
+let currentOrder = ORDER_SINGLE;
+let nodePos = {};
+let SEGMENTS = [];
+const conns = {}; // "from->to" -> { el, type: "line"|"cubic", p0, c1?, c2?, p2, kind }
 const nodeEls = {};
+let loopBadgeBg = {}; // kind -> <rect> pill behind that loop's counter label
 
-function nodeCenter(id) {
-  if (id === "model") return { x: CENTER.x, y: CENTER.y };
-  return { x: NODES[id].x, y: NODES[id].y };
+// Loop-back edges are routed through a dedicated vertical "lane" offset from
+// the main spine (a cubic bezier whose control points share the lane's x),
+// rather than a single symmetric bow — this is what makes them read as
+// distinct side lanes (like a real flowchart draws back-edges) instead of
+// one arc crossing behind the node column.
+function computeLayout(mode) {
+  currentOrder = mode === "multi" ? ORDER_MULTI : ORDER_SINGLE;
+  nodePos = {};
+  currentOrder.forEach((id, i) => { nodePos[id] = { x: CX, y: TOP + i * ROW_H }; });
+
+  const segs = [];
+  for (let i = 0; i < currentOrder.length - 1; i++) segs.push([currentOrder[i], currentOrder[i + 1], null, 0]);
+  if (mode === "multi") {
+    segs.push(["oracle", "planner", "retry", -360]);
+    segs.push(["tester", "coder", "sameplan", -210]);
+    segs.push(["tools", "provider", "toolloop", 280]);
+    segs.push(["tester", "provider", "toolloop", 380]);
+  } else {
+    segs.push(["oracle", "orchestrator", "retry", -300]);
+    segs.push(["tools", "provider", "toolloop", 280]);
+  }
+  SEGMENTS = segs;
+  return TOP + currentOrder.length * ROW_H + 40;
 }
 
-// Control point: bow the segment outward from the center for a ring look.
-// The tool-loop arc bows INWARD instead (negative), so it visually reads as
-// a shortcut through the inside of the ring, distinct from the outer retry arc.
-function controlPoint(a, b, kind) {
-  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-  const dir = { x: mid.x - CENTER.x, y: mid.y - CENTER.y };
-  const len = Math.hypot(dir.x, dir.y) || 1;
-  const bow = kind === "retry" ? 78 : kind === "spur" ? 0 : kind === "toolloop" ? -55 : 46;
-  return { x: mid.x + (dir.x / len) * bow, y: mid.y + (dir.y / len) * bow };
+function nodeCenter(id) { return nodePos[id]; }
+
+// Where a ray from `center` toward `towardPoint` exits the node's box —
+// edges connect at the box boundary, not the center, so nothing renders
+// hidden underneath a (later-in-DOM, opaque) node.
+function clipToBox(center, towardPoint, halfW, halfH) {
+  const dx = towardPoint.x - center.x, dy = towardPoint.y - center.y;
+  if (dx === 0 && dy === 0) return { x: center.x, y: center.y };
+  const tx = dx !== 0 ? halfW / Math.abs(dx) : Infinity;
+  const ty = dy !== 0 ? halfH / Math.abs(dy) : Infinity;
+  const t = Math.min(tx, ty, 1);
+  return { x: center.x + dx * t, y: center.y + dy * t };
 }
 
-function qbez(p0, p1, p2, t) {
+function cubicPoint(p0, c1, c2, p3, t) {
   const u = 1 - t;
   return {
-    x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x,
-    y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y,
+    x: u * u * u * p0.x + 3 * u * u * t * c1.x + 3 * u * t * t * c2.x + t * t * t * p3.x,
+    y: u * u * u * p0.y + 3 * u * u * t * c1.y + 3 * u * t * t * c2.y + t * t * t * p3.y,
   };
 }
+function pointOnConn(conn, t) {
+  if (conn.type === "cubic") return cubicPoint(conn.p0, conn.c1, conn.c2, conn.p2, t);
+  const u = 1 - t;
+  return { x: conn.p0.x * u + conn.p2.x * t, y: conn.p0.y * u + conn.p2.y * t };
+}
 
-// ---------------------------------------------------------------------------
-// Build the board
-// ---------------------------------------------------------------------------
-function buildBoard() {
+function buildBoard(mode) {
+  const height = computeLayout(mode);
+  document.getElementById("board").setAttribute("viewBox", `0 0 ${BOARD_W} ${height}`);
+
   const connG = document.getElementById("conns");
-  for (const [from, to, kind] of SEGMENTS) {
-    let a = nodeCenter(from), b = nodeCenter(to);
-    // For the spur, stop at the model's edge instead of its center.
-    if (kind === "spur") {
-      const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy);
-      b = { x: b.x + (dx / d) * MODEL_R, y: b.y + (dy / d) * MODEL_R };
-    }
-    const p1 = controlPoint(a, b, kind);
+  const nodesG = document.getElementById("nodes");
+  const badgesG = document.getElementById("loop-badges");
+  connG.innerHTML = ""; nodesG.innerHTML = ""; badgesG.innerHTML = "";
+  for (const k of Object.keys(conns)) delete conns[k];
+  for (const k of Object.keys(nodeEls)) delete nodeEls[k];
+  loopBadgeBg = {};
+
+  for (const [from, to, kind, laneOffset] of SEGMENTS) {
+    const aCenter = nodeCenter(from), bCenter = nodeCenter(to);
     const path = document.createElementNS(SVGNS, "path");
-    path.setAttribute("d", `M ${a.x} ${a.y} Q ${p1.x} ${p1.y} ${b.x} ${b.y}`);
     path.setAttribute("class", "conn" + (kind ? " " + kind : ""));
     connG.appendChild(path);
-    conns[`${from}->${to}`] = { el: path, p0: a, p1, p2: b };
+
+    if (!kind) {
+      const p0 = clipToBox(aCenter, bCenter, NW / 2, NH / 2);
+      const p2 = clipToBox(bCenter, aCenter, NW / 2, NH / 2);
+      path.setAttribute("d", `M ${p0.x} ${p0.y} L ${p2.x} ${p2.y}`);
+      conns[`${from}->${to}`] = { el: path, type: "line", p0, p2, kind };
+    } else {
+      const laneX = CX + laneOffset;
+      const c1 = { x: laneX, y: aCenter.y }, c2 = { x: laneX, y: bCenter.y };
+      const p0 = clipToBox(aCenter, c1, NW / 2, NH / 2);
+      const p2 = clipToBox(bCenter, c2, NW / 2, NH / 2);
+      path.setAttribute("d", `M ${p0.x} ${p0.y} C ${c1.x} ${c1.y} ${c2.x} ${c2.y} ${p2.x} ${p2.y}`);
+      conns[`${from}->${to}`] = { el: path, type: "cubic", p0, c1, c2, p2, kind };
+    }
   }
 
-  const nodesG = document.getElementById("nodes");
-  for (const [id, n] of Object.entries(NODES)) {
+  const badgeKinds = new Set();
+  for (const [from, to, kind] of SEGMENTS) {
+    if (!kind || badgeKinds.has(kind)) continue;
+    badgeKinds.add(kind);
+    const conn = conns[`${from}->${to}`];
+    const mid = pointOnConn(conn, 0.5);
+
+    const bg = document.createElementNS(SVGNS, "rect");
+    bg.setAttribute("class", `loop-badge-bg loop-badge-bg-${kind} hidden`);
+    bg.setAttribute("rx", 6);
+    badgesG.appendChild(bg);
+
+    const text = document.createElementNS(SVGNS, "text");
+    text.setAttribute("class", `loop-badge loop-badge-${kind} hidden`);
+    text.setAttribute("x", mid.x);
+    text.setAttribute("y", mid.y);
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("dominant-baseline", "middle");
+    text.id = `badge-${kind}`;
+    badgesG.appendChild(text);
+    loopBadgeBg[kind] = bg;
+  }
+
+  for (const id of currentOrder) {
+    const n = nodePos[id], meta = NODE_META[id];
     const g = document.createElementNS(SVGNS, "g");
     g.setAttribute("class", "node idle");
     g.dataset.id = id;
     const x = n.x - NW / 2, y = n.y - NH / 2;
     g.innerHTML = `
-      <rect class="box" x="${x}" y="${y}" width="${NW}" height="${NH}" rx="12"></rect>
-      <text class="pnum" x="${x + 12}" y="${y + 18}">${n.p}</text>
-      <text class="title" x="${n.x}" y="${n.y + 2}" text-anchor="middle">${n.title}</text>
-      <text class="tag" x="${n.x}" y="${n.y + 18}" text-anchor="middle">${n.tag}</text>`;
+      <rect class="box" x="${x}" y="${y}" width="${NW}" height="${NH}" rx="14"></rect>
+      <text class="pnum" x="${x + 12}" y="${y + 18}">${meta.p}</text>
+      <text class="title" x="${n.x}" y="${n.y + 2}" text-anchor="middle">${meta.title}</text>
+      <text class="tag" x="${n.x}" y="${n.y + 18}" text-anchor="middle">${meta.tag}</text>`;
     nodesG.appendChild(g);
     nodeEls[id] = g;
     g.addEventListener("click", () => openInspector(id));
@@ -98,76 +165,83 @@ function buildBoard() {
 }
 
 // ---------------------------------------------------------------------------
-// Primitive animations
+// Primitive animation
 // ---------------------------------------------------------------------------
 const packet = document.getElementById("packet");
-const modelEl = document.getElementById("model");
 const easeInOut = (p) => (p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2);
 const dwell = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function tween(dur, onUpdate) {
-  // Drive with rAF for smoothness, but also arm a timer each step: if the
-  // tab is backgrounded (rAF throttled or paused), the timer still advances
-  // the tween to completion so the flow never stalls mid-travel.
   return new Promise((res) => {
     const t0 = performance.now();
     let done = false, raf = 0, timer = 0;
     function step() {
       if (done) return;
-      cancelAnimationFrame(raf);
-      clearTimeout(timer);
+      cancelAnimationFrame(raf); clearTimeout(timer);
       const p = Math.min(1, (performance.now() - t0) / dur);
       onUpdate(easeInOut(p));
-      if (p < 1) {
-        raf = requestAnimationFrame(step);
-        timer = setTimeout(step, 100);
-      } else {
-        done = true;
-        res();
-      }
+      if (p < 1) { raf = requestAnimationFrame(step); timer = setTimeout(step, 100); }
+      else { done = true; res(); }
     }
     step();
   });
 }
-
-function setPacketPos(pt) {
-  packet.setAttribute("transform", `translate(${pt.x} ${pt.y})`);
-}
-function showPacketAt(id) {
-  packet.classList.remove("hidden");
-  setPacketPos(nodeCenter(id));
-}
+function setPacketPos(pt) { packet.setAttribute("transform", `translate(${pt.x} ${pt.y})`); }
 function setNode(id, state) {
   const el = nodeEls[id];
   if (!el) return;
   el.classList.remove("idle", "active", "exec", "done", "warn");
   el.classList.add(state);
 }
-function resetRing() {
-  for (const id of Object.keys(NODES)) setNode(id, "idle");
-}
+function resetNodes() { for (const id of currentOrder) setNode(id, "idle"); }
 
-async function travel(from, to, opts = {}) {
+async function travel(from, to) {
   let conn = conns[`${from}->${to}`];
   let reverse = false;
   if (!conn) { conn = conns[`${to}->${from}`]; reverse = true; }
-  if (!conn) { setPacketPos(nodeCenter(to)); return; }
+  if (!conn) { packet.classList.remove("hidden"); setPacketPos(nodeCenter(to)); return; }
 
-  const isRetry = conn.el.classList.contains("retry");
-  const isToolLoop = conn.el.classList.contains("toolloop");
-  packet.classList.toggle("retry", isRetry);
-  packet.classList.toggle("toolloop", isToolLoop);
+  packet.classList.remove("hidden");
+  packet.classList.toggle("retry", conn.kind === "retry");
+  packet.classList.toggle("sameplan", conn.kind === "sameplan");
+  packet.classList.toggle("toolloop", conn.kind === "toolloop");
   conn.el.classList.add("flowing");
-  await tween(opts.dur || 470, (t) => {
+  await tween(conn.kind ? 620 : 420, (t) => {
     const tt = reverse ? 1 - t : t;
-    setPacketPos(qbez(conn.p0, conn.p1, conn.p2, tt));
+    setPacketPos(pointOnConn(conn, tt));
   });
   conn.el.classList.remove("flowing");
   conn.el.classList.add("traveled");
-  packet.classList.remove("retry", "toolloop");
+  packet.classList.remove("retry", "sameplan", "toolloop");
 }
 
-function modelThink(on) { modelEl.classList.toggle("think", on); }
+function setLoopBadge(kind, text) {
+  const el = document.getElementById(`badge-${kind}`);
+  const bg = loopBadgeBg[kind];
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("hidden", !text);
+  if (!bg) return;
+  if (!text) { bg.classList.add("hidden"); return; }
+  bg.classList.remove("hidden");
+  // Size the pill to the actual rendered text so the label reads cleanly
+  // regardless of what's behind it, instead of a fixed guessed width.
+  const box = el.getBBox();
+  const padX = 8, padY = 4;
+  bg.setAttribute("x", box.x - padX);
+  bg.setAttribute("y", box.y - padY);
+  bg.setAttribute("width", box.width + padX * 2);
+  bg.setAttribute("height", box.height + padY * 2);
+}
+function flashLoopEdge(kind) {
+  const el = document.getElementById(`badge-${kind}`);
+  if (!el) return;
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 500);
+}
+
+const modelDotEl = document.getElementById("model-dot");
+function modelThink(on) { modelDotEl.classList.toggle("think", on); }
 function setModelInfo(name, stat) {
   if (name) document.getElementById("model-name").textContent = name;
   if (stat !== undefined) document.getElementById("model-stat").textContent = stat;
@@ -180,13 +254,32 @@ function setModelInfo(name, stat) {
 // ---------------------------------------------------------------------------
 let queue = [], waiter = null, runToken = 0;
 
-// Tool-call round tracking — an "attempt" (Python's outer retry loop) can
-// now contain several inner rounds of Provider->Tools before it finalizes
-// (the model deciding to call run_tests/trace_execution/etc. on its own).
-// Without this, every round looked identical to a fresh attempt, which is
-// what made the graph look like it was looping uncontrollably.
 let toolRoundInAttempt = 0;
 let lastToolModelInitiated = false;
+let currentMode = "single";
+let plannerJustRan = false;
+let retryLoopCount = 0;
+let sameplanLoopCount = 0;
+let toolLoopCount = 0;
+
+// Synchronous event tagging — every event is stamped with which attempt (and,
+// in multi mode, which subagent role) it belongs to the instant it arrives,
+// independent of the animation queue's pacing. Several event kinds
+// (approval_gate, gen_ai.tool, sandbox_exec, ...) don't carry attempt_no in
+// their own attrs, so this is what lets the story feed and the inspector
+// still attribute them correctly.
+let currentAttemptNo = 0;
+let currentSubagentRole = null;
+function tagEvent(evt) {
+  const a = evt.attrs || {};
+  if (evt.kind === "orchestrator" && evt.name === "attempt" && evt.status === "started") {
+    currentAttemptNo = a.attempt_no || currentAttemptNo + 1;
+    currentSubagentRole = null;
+  }
+  if (evt.kind === "subagent" && evt.status === "started") currentSubagentRole = a.role;
+  evt._attemptNo = currentAttemptNo;
+  evt._role = currentSubagentRole;
+}
 
 function pushAction(fn) {
   queue.push(fn);
@@ -205,23 +298,46 @@ async function runConsumer(myToken) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspector: click a node to see that primitive's real input/output for the
-// current run. Every trace event (with full attrs) is kept in memory as it
-// streams in; clicking a node filters to that primitive's spans, grouped by
-// span_id (a span's "started" event = input, its "ok"/"error" event = output).
+// Inspector: click a node to see every real call to that primitive across
+// the whole run (there's only one node instance now), most recent first,
+// each card labeled with which attempt it happened in.
 // ---------------------------------------------------------------------------
 let currentRunEvents = [];
 
-const KIND_TO_NODE = {
-  instructions: "instructions",
-  "gen_ai.completion": "provider",
-  approval_gate: "approval",
-  "gen_ai.tool": "tools",
-  sandbox_exec: "sandbox",
-  verification: "oracle",
-  orchestrator: "orchestrator",
-  run: "orchestrator",
+const KIND_TO_NODE_SINGLE = {
+  instructions: "instructions", "gen_ai.completion": "provider", approval_gate: "approval",
+  "gen_ai.tool": "tools", sandbox_exec: "sandbox", verification: "oracle",
+  orchestrator: "orchestrator", run: "orchestrator",
 };
+const KIND_TO_NODE_MULTI = {
+  "gen_ai.completion": "provider", approval_gate: "approval",
+  "gen_ai.tool": "tools", sandbox_exec: "sandbox", verification: "oracle",
+  orchestrator: "planner", run: "planner",
+};
+function kindToNode(kind) {
+  return (currentMode === "multi" ? KIND_TO_NODE_MULTI : KIND_TO_NODE_SINGLE)[kind];
+}
+
+const SUBAGENT_ROLES = new Set(["planner", "coder", "tester"]);
+function buildSubagentInspectorBody(role) {
+  const spans = currentRunEvents.filter((e) => e.kind === "subagent" && (e.attrs || {}).role === role);
+  const started = spans.filter((e) => e.status === "started").slice().reverse();
+  if (!started.length) return `<div class="insp-empty">No calls to this subagent yet in the current run.</div>`;
+  return started.map((s) => {
+    const end = spans.find((e) => e.span_id === s.span_id && e.status !== "started");
+    const dur = end && end.duration_ms != null ? `${end.duration_ms.toFixed(1)}ms` : "";
+    const status = end ? end.status : "started";
+    return `
+      <div class="insp-card">
+        <div class="insp-card-head">
+          <span class="insp-card-title">${role} · attempt ${s.attrs.attempt_no ?? "?"}</span>
+          <span class="insp-card-meta"><span class="st ${status}">${status}</span>${dur ? ` · ${dur}` : ""}</span>
+        </div>
+        <div class="insp-section"><h4>Input</h4>${fmtAttrs(s.attrs)}</div>
+        <div class="insp-section"><h4>Output</h4>${fmtAttrs((end && end.attrs) || {})}</div>
+      </div>`;
+  }).join("");
+}
 
 function fmtValue(key, val) {
   if (val == null) return `<span class="v-null">—</span>`;
@@ -259,24 +375,16 @@ function fmtAttrs(attrs, skipKeys) {
 }
 
 function buildInspectorBody(nodeId) {
-  const spans = new Map(); // span_id -> { name, start, end }
+  const spans = new Map(); // span_id -> { name, start, end, attemptNo }
   for (const evt of currentRunEvents) {
-    if (KIND_TO_NODE[evt.kind] !== nodeId) continue;
-    if (evt.kind === "orchestrator" && evt.name !== "attempt") continue; // skip nested spans already shown elsewhere
-    if (!spans.has(evt.span_id)) spans.set(evt.span_id, { name: evt.name, start: null, end: null });
+    if (kindToNode(evt.kind) !== nodeId) continue;
+    if (evt.kind === "orchestrator" && evt.name !== "attempt") continue;
+    if (!spans.has(evt.span_id)) spans.set(evt.span_id, { name: evt.name, start: null, end: null, attemptNo: evt._attemptNo });
     const s = spans.get(evt.span_id);
-    if (evt.status === "started") s.start = evt;
-    else s.end = evt;
+    if (evt.status === "started") s.start = evt; else s.end = evt;
   }
-
-  const groups = [...spans.values()].sort((a, b) => {
-    const ta = (a.start || a.end).timestamp, tb = (b.start || b.end).timestamp;
-    return tb - ta; // most recent first
-  });
-
-  if (!groups.length) {
-    return `<div class="insp-empty">No calls to this primitive yet in the current run.</div>`;
-  }
+  const groups = [...spans.values()].sort((a, b) => (b.start || b.end).timestamp - (a.start || a.end).timestamp);
+  if (!groups.length) return `<div class="insp-empty">No calls to this primitive yet in the current run.</div>`;
 
   return groups.map((g) => {
     const startAttrs = (g.start && g.start.attrs) || {};
@@ -285,12 +393,9 @@ function buildInspectorBody(nodeId) {
     for (const [k, v] of Object.entries(endAttrs)) {
       if (!(k in startAttrs) || JSON.stringify(startAttrs[k]) !== JSON.stringify(v)) outputOnly[k] = v;
     }
-    const attemptNo = startAttrs.attempt_no ?? endAttrs.attempt_no;
     const status = g.end ? g.end.status : "started";
     const dur = g.end && g.end.duration_ms != null ? `${g.end.duration_ms.toFixed(1)}ms` : "";
-    const cardTitle = attemptNo != null
-      ? (g.name === "attempt" ? `attempt ${attemptNo}` : `${g.name} · attempt ${attemptNo}`)
-      : g.name;
+    const cardTitle = g.name === "attempt" ? `attempt ${g.attemptNo}` : `${g.name} · attempt ${g.attemptNo}`;
     return `
       <div class="insp-card">
         <div class="insp-card-head">
@@ -304,8 +409,8 @@ function buildInspectorBody(nodeId) {
 }
 
 // Single reusable modal — used both for the node inspector and for
-// expanding a single log line's full event detail, so both look and behave
-// the same way (scrollable body, click-outside/Escape/× to close).
+// expanding a single event's full detail, so both look and behave the
+// same way (scrollable body, click-outside/Escape/× to close).
 let modalEl = null;
 function ensureModal() {
   if (modalEl) return modalEl;
@@ -314,10 +419,7 @@ function ensureModal() {
   el.innerHTML = `
     <div class="insp-panel">
       <div class="insp-head">
-        <div>
-          <div class="insp-tag" id="insp-tag"></div>
-          <div class="insp-title" id="insp-title"></div>
-        </div>
+        <div><div class="insp-tag" id="insp-tag"></div><div class="insp-title" id="insp-title"></div></div>
         <button class="insp-close" aria-label="close">&times;</button>
       </div>
       <div class="insp-body" id="insp-body"></div>
@@ -329,9 +431,7 @@ function ensureModal() {
   modalEl = el;
   return el;
 }
-function closeModal() {
-  if (modalEl) modalEl.classList.add("hidden");
-}
+function closeModal() { if (modalEl) modalEl.classList.add("hidden"); }
 function openModal(tag, title, bodyHtml) {
   const el = ensureModal();
   document.getElementById("insp-tag").textContent = tag;
@@ -340,14 +440,69 @@ function openModal(tag, title, bodyHtml) {
   el.classList.remove("hidden");
 }
 function openInspector(nodeId) {
-  const n = NODES[nodeId];
-  openModal(`${n.p} · ${n.tag}`, n.title, buildInspectorBody(nodeId));
+  const meta = NODE_META[nodeId];
+  const body = SUBAGENT_ROLES.has(nodeId) ? buildSubagentInspectorBody(nodeId) : buildInspectorBody(nodeId);
+  openModal(`${meta.p} · ${meta.tag}`, meta.title, body);
+}
+
+// ---------------------------------------------------------------------------
+// Story narration — turns raw trace events into the plain-English sentences
+// that explain why a small model can land a hard problem: the harness caught
+// its mistake, told it exactly what was wrong, and made it try again. Not
+// every event narrates (sandbox spin-up, individual approval gates); the
+// full raw trace is always one click away via each attempt's "raw trace" toggle.
+// ---------------------------------------------------------------------------
+function narrate(evt) {
+  const a = evt.attrs || {};
+  if (evt.kind === "orchestrator" && evt.name === "attempt" && evt.status === "started") {
+    const n = a.attempt_no || evt._attemptNo;
+    return n === 1
+      ? { icon: "▶️", text: "Asking the model to solve it from scratch." }
+      : { icon: "🔁", text: `Retrying — attempt ${n}, with the previous failure fed back into the prompt.` };
+  }
+  if (evt.kind === "subagent" && evt.status === "ok") {
+    const role = a.role;
+    if (role === "planner") {
+      const n = (a.plan_steps || []).length;
+      return { icon: "🗺️", text: `Planner drafted a ${n}-step plan — no code yet, just a strategy.` };
+    }
+    if (role === "coder") {
+      const tools = (a.tools_used || []).filter((t) => t !== "run_tests");
+      return { icon: "👨‍💻", text: `Coder wrote an implementation${tools.length ? ` (self-checked with: ${tools.join(", ")})` : ""}.` };
+    }
+    if (role === "tester") {
+      return a.oracle_passed
+        ? { icon: "✅", text: "Tester ran the official oracle — every case passed." }
+        : { icon: "❌", text: `Tester ran the official oracle — ${a.score != null ? Math.round((1 - a.score) * 100) + "%" : "some"} of cases failed.` };
+    }
+  }
+  if (evt.kind === "gen_ai.tool" && evt.status === "started") {
+    return a.model_initiated
+      ? { icon: "🔧", text: `Model chose to call \`${a["gen_ai.tool.name"]}\` itself, to double-check its own answer before committing.` }
+      : { icon: "🛡️", text: `Harness runs its own authoritative \`${a["gen_ai.tool.name"]}\` check — the model's word alone is never trusted.` };
+  }
+  if (evt.kind === "verification" && evt.status === "ok") {
+    return a.oracle_passed
+      ? { icon: "✅", text: "Oracle verdict: all test cases passed." }
+      : { icon: "❌", text: `Oracle verdict: ${a.failed_case_count ?? "some"} case(s) failed — this is what gets fed back to the model.` };
+  }
+  if (evt.kind === "skill" && evt.name === "skill_loaded") {
+    return { icon: "📘", text: `Loaded the "${a.skill}" technique notes into context (kata category: ${a.kata_category}) — extra know-how the base model doesn't have baked in.` };
+  }
+  if (evt.kind === "memory" && evt.name === "memory_recall") {
+    return { icon: "🧠", text: `Recalled a hint from a previous run: ${a.hint}` };
+  }
+  if (evt.kind === "gen_ai.completion" && evt.status === "ok" && (a.safety_retries || 0) > 0) {
+    return { icon: "⚠️", text: `The provider routed the request to a safety/moderation model instead of a real one — the harness detected that and retried ×${a.safety_retries}.` };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
 // Event → action mapping
 // ---------------------------------------------------------------------------
 function handleEvent(evt) {
+  tagEvent(evt);
   currentRunEvents.push(evt);
   appendLog(evt);
   const a = evt.attrs || {};
@@ -355,22 +510,31 @@ function handleEvent(evt) {
 
   switch (key) {
     case "run:started":
-      pushAction(async () => { setStatus("running"); showPacketAt("orchestrator"); });
+      pushAction(async () => { setStatus("running"); });
       break;
 
     case "orchestrator:started":
       if (evt.name !== "attempt") break;
       pushAction(async () => {
-        const n = a.attempt_no || 1;
+        const n = a.attempt_no || evt._attemptNo;
         setAttempt(n);
         toolRoundInAttempt = 0;
         setToolRound(0);
         if (n > 1) {
-          setNode("orchestrator", "idle");
-          await travel("oracle", "orchestrator"); // retry loop
-          resetRing();
+          retryLoopCount++;
+          const retryFrom = currentMode === "multi" ? "oracle" : "oracle";
+          const retryTo = currentMode === "multi" ? "planner" : "orchestrator";
+          // Only the multi-mode "replanned" retry is decided later (by
+          // whether Planner actually runs) — in single mode every retry
+          // takes this edge, so animate it now.
+          if (currentMode === "single") {
+            setNode("oracle", "idle");
+            await travel(retryFrom, retryTo);
+            resetNodes();
+            setLoopBadge("retry", `retry ×${retryLoopCount}`);
+          }
         }
-        setNode("orchestrator", "active");
+        if (currentMode === "single") setNode("orchestrator", "active");
       });
       break;
 
@@ -379,7 +543,53 @@ function handleEvent(evt) {
         setNode("orchestrator", "done");
         await travel("orchestrator", "instructions");
         setNode("instructions", "active");
-        await dwell(160);
+        await dwell(140);
+      });
+      break;
+
+    case "subagent:started":
+      pushAction(async () => {
+        const role = a.role;
+        const attemptNo = evt._attemptNo;
+        toolRoundInAttempt = 0;
+        setToolRound(0);
+
+        if (role === "planner") {
+          plannerJustRan = true;
+          if (attemptNo > 1) {
+            retryLoopCount++;
+            setNode("oracle", "idle");
+            await travel("oracle", "planner");
+            resetNodes();
+            setLoopBadge("retry", `replanned retry ×${retryLoopCount}`);
+          }
+          setNode("planner", "active");
+        } else if (role === "coder") {
+          if (plannerJustRan) {
+            setNode("planner", "done");
+            await travel("planner", "coder");
+          } else if (attemptNo > 1) {
+            sameplanLoopCount++;
+            setNode("tester", "idle");
+            for (const id of ["provider", "approval", "tools", "sandbox"]) setNode(id, "idle");
+            await travel("tester", "coder");
+            setLoopBadge("sameplan", `same-plan retry ×${sameplanLoopCount}`);
+          }
+          plannerJustRan = false;
+          setNode("coder", "active");
+        } else if (role === "tester") {
+          setNode("coder", "done");
+          await travel("coder", "tester");
+          setNode("tester", "active");
+        }
+      });
+      break;
+
+    case "subagent:ok":
+      pushAction(async () => {
+        const role = a.role;
+        if (role === "tester") setNode("tester", a.oracle_passed === false ? "warn" : "done");
+        else setNode(role, "done");
       });
       break;
 
@@ -387,18 +597,17 @@ function handleEvent(evt) {
       pushAction(async () => {
         toolRoundInAttempt++;
         setToolRound(toolRoundInAttempt);
-        if (toolRoundInAttempt === 1) {
-          // First round of this attempt: the normal Instructions -> Provider path.
-          setNode("instructions", "done");
-          await travel("instructions", "provider");
+        const fromNode = toolRoundInAttempt === 1 ? (currentMode === "single" ? "instructions" : evt._role) : "tools";
+        const useLoop = !MAIN_PATH_INTO_PROVIDER.has(fromNode);
+        setNode(fromNode, "done");
+        if (useLoop) {
+          toolLoopCount++;
+          await travel(fromNode, "provider");
+          setLoopBadge("toolloop", `model asked again ×${toolLoopCount}`);
         } else {
-          // The model is being asked again after seeing a tool result —
-          // it's coming back from Tools, not from a fresh Instructions build.
-          setNode("tools", "done");
-          await travel("tools", "provider");
+          await travel(fromNode, "provider");
         }
         setNode("provider", "active");
-        await travel("provider", "model");
         modelThink(true);
       });
       break;
@@ -406,17 +615,15 @@ function handleEvent(evt) {
     case "gen_ai.completion:ok":
       pushAction(async () => {
         const model = a["gen_ai.response.model"] || "LLM";
-        const toks = (a["gen_ai.usage.output_tokens"] ?? "?");
+        const toks = a["gen_ai.usage.output_tokens"] ?? "?";
         const lat = a["latency_ms"] != null ? `${Math.round(a["latency_ms"])}ms` : "";
         setModelInfo(model, `${toks} out · ${lat}`);
         modelThink(false);
-        await travel("model", "provider");
         const sr = a["safety_retries"] || 0;
         if (sr > 0) {
-          modelEl.classList.add("warnflash");
-          logNote(`safety-retry ×${sr} — re-routed past the moderation model`, "safety");
+          modelDotEl.classList.add("warnflash");
           await dwell(500);
-          modelEl.classList.remove("warnflash");
+          modelDotEl.classList.remove("warnflash");
         }
       });
       break;
@@ -426,7 +633,7 @@ function handleEvent(evt) {
         setNode("provider", "done");
         await travel("provider", "approval");
         setNode("approval", "active");
-        await dwell(220);
+        await dwell(160);
         setNode("approval", "done");
       });
       break;
@@ -434,26 +641,23 @@ function handleEvent(evt) {
     case "gen_ai.tool:started":
       pushAction(async () => {
         lastToolModelInitiated = !!a.model_initiated;
-        nodeEls.tools.classList.toggle("selfcheck", lastToolModelInitiated);
+        if (nodeEls.tools) nodeEls.tools.classList.toggle("selfcheck", lastToolModelInitiated);
         await travel("approval", "tools");
         setNode("tools", "active");
-        await dwell(120);
+        await dwell(90);
       });
       break;
 
     case "sandbox_exec:started":
       pushAction(async () => {
         setNode("tools", "done");
-        nodeEls.sandbox.classList.toggle("selfcheck", lastToolModelInitiated);
+        if (nodeEls.sandbox) nodeEls.sandbox.classList.toggle("selfcheck", lastToolModelInitiated);
         await travel("tools", "sandbox");
         setNode("sandbox", "exec");
       });
       break;
 
     case "gen_ai.tool:ok":
-      // lookup_docs / algorithm_hint / analyze_complexity never touch the
-      // sandbox — nothing else would ever mark this node "done" for them.
-      // Harmless no-op for tools that DO use the sandbox (already "done").
       pushAction(async () => { setNode("tools", "done"); });
       break;
 
@@ -462,8 +666,18 @@ function handleEvent(evt) {
         setNode("sandbox", "done");
         await travel("sandbox", "oracle");
         setNode("oracle", "active");
-        await dwell(180);
+        await dwell(150);
         setNode("oracle", a.oracle_passed ? "done" : "warn");
+        // Update this attempt's log-group badge as soon as its verdict is
+        // known, rather than waiting for the whole run to finish — a
+        // self-check earlier in the same attempt may later be overridden
+        // by the harness's own authoritative check, and since events are
+        // processed in order, the last verification for this attempt wins.
+        const group = logGroups[evt._attemptNo];
+        if (group) {
+          group.badgeEl.className = "log-group-badge " + (a.oracle_passed ? "pass" : "fail");
+          group.badgeEl.textContent = a.oracle_passed ? "pass" : "fail";
+        }
       });
       break;
 
@@ -474,31 +688,96 @@ function handleEvent(evt) {
 }
 
 // ---------------------------------------------------------------------------
-// Log + status + result panels
+// Story feed (Live Trace panel): narrated sentences grouped by attempt,
+// current expanded, past collapsed, raw events one click away per group.
 // ---------------------------------------------------------------------------
 const logEl = document.getElementById("log");
 let logCount = 0;
+let logGroups = {}; // attempt_no -> group
+let currentLogGroupNo = null;
+
+function ensureLogGroup(attemptNo) {
+  if (logGroups[attemptNo]) return logGroups[attemptNo];
+  if (logEl.querySelector(".empty")) logEl.innerHTML = "";
+  if (currentLogGroupNo != null && logGroups[currentLogGroupNo]) {
+    logGroups[currentLogGroupNo].el.classList.add("collapsed"); // previous attempt is finished
+  }
+  const el = document.createElement("div");
+  el.className = "log-group";
+  const title = attemptNo === 0 ? "Run" : `Attempt ${attemptNo}`;
+  el.innerHTML = `
+    <div class="log-group-head">
+      <span class="log-group-chev">&#9660;</span>
+      <span class="log-group-title">${title}</span>
+      <span class="log-group-badge running">running</span>
+      <span class="log-group-count">0 events</span>
+    </div>
+    <div class="log-group-body">
+      <div class="story-list"></div>
+      <div class="raw-toggle">show raw trace (0)</div>
+      <div class="raw-list hidden"></div>
+    </div>`;
+  logEl.appendChild(el);
+  el.querySelector(".log-group-head").addEventListener("click", () => el.classList.toggle("collapsed"));
+  const rawToggle = el.querySelector(".raw-toggle");
+  const rawList = el.querySelector(".raw-list");
+  rawToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    rawList.classList.toggle("hidden");
+    rawToggle.textContent = rawList.classList.contains("hidden")
+      ? `show raw trace (${group.rawCount})` : `hide raw trace (${group.rawCount})`;
+  });
+  const group = {
+    el, storyEl: el.querySelector(".story-list"), rawEl: rawList, rawToggleEl: rawToggle,
+    badgeEl: el.querySelector(".log-group-badge"), countEl: el.querySelector(".log-group-count"), rawCount: 0,
+  };
+  if (attemptNo === 0) group.badgeEl.classList.add("hidden"); // the top-level "run" span has no pass/fail of its own
+  logGroups[attemptNo] = group;
+  currentLogGroupNo = attemptNo;
+  return group;
+}
 
 function appendLog(evt) {
-  if (logEl.querySelector(".empty")) logEl.innerHTML = "";
-  const line = document.createElement("div");
-  line.className = "log-line";
+  const group = ensureLogGroup(evt._attemptNo);
+
+  const rawLine = document.createElement("div");
+  rawLine.className = "log-line";
   const dur = evt.duration_ms != null ? `${evt.duration_ms.toFixed(1)}ms` : "";
-  line.innerHTML =
-    `<span class="st ${evt.status}">${evt.status}</span>` +
-    `<span class="nm">${evt.name}</span><span class="du">${dur}</span>`;
-  line.title = "click to open event detail";
-  line.addEventListener("click", () => openLogDetail(evt));
-  logEl.appendChild(line);
+  rawLine.innerHTML = `<span class="st ${evt.status}">${evt.status}</span><span class="nm">${evt.name}</span><span class="du">${dur}</span>`;
+  rawLine.title = "click to open event detail";
+  rawLine.addEventListener("click", () => openLogDetail(evt));
+  group.rawEl.appendChild(rawLine);
+  group.rawCount++;
+  const hidden = group.rawEl.classList.contains("hidden");
+  group.rawToggleEl.textContent = `${hidden ? "show" : "hide"} raw trace (${group.rawCount})`;
+
+  const note = narrate(evt);
+  if (note) {
+    const storyLine = document.createElement("div");
+    storyLine.className = "story-line";
+    storyLine.innerHTML = `<span class="story-icon">${note.icon}</span><span class="story-text">${escapeHtml(note.text)}</span>`;
+    storyLine.title = "click to see the underlying event";
+    storyLine.addEventListener("click", () => openLogDetail(evt));
+    group.storyEl.appendChild(storyLine);
+  }
+
+  group.countEl.textContent = `${group.rawCount} events`;
   logEl.scrollTop = logEl.scrollHeight;
   document.getElementById("log-count").textContent = `${++logCount} events`;
 }
 
+function finalizeLogGroups(result) {
+  result.attempts.forEach((at) => {
+    const group = logGroups[at.attempt_no];
+    if (!group) return;
+    const passed = at.report.oracle_passed;
+    group.badgeEl.className = "log-group-badge " + (passed ? "pass" : "fail");
+    group.badgeEl.textContent = passed ? "pass" : "fail";
+  });
+}
+
 function openLogDetail(evt) {
-  const meta = {
-    span_id: evt.span_id, parent_span_id: evt.parent_span_id,
-    kind: evt.kind, timestamp: evt.timestamp,
-  };
+  const meta = { span_id: evt.span_id, parent_span_id: evt.parent_span_id, kind: evt.kind, timestamp: evt.timestamp };
   const body = `
     <div class="insp-card">
       <div class="insp-card-head">
@@ -510,31 +789,18 @@ function openLogDetail(evt) {
     </div>`;
   openModal(evt.kind, evt.name, body);
 }
-function logNote(text, cls) {
-  const line = document.createElement("div");
-  line.className = "log-line " + (cls || "");
-  line.innerHTML = `<span class="st ok">note</span><span class="nm">${text}</span>`;
-  logEl.appendChild(line);
-  logEl.scrollTop = logEl.scrollHeight;
-}
 
 function setStatus(s) {
   const pill = document.getElementById("status-pill");
   pill.className = "pill " + s;
   pill.textContent = s;
 }
-function setAttempt(n) {
-  document.getElementById("attempt-counter").innerHTML = `attempt <b>${n}</b>`;
-}
+function setAttempt(n) { document.getElementById("attempt-counter").innerHTML = `attempt <b>${n}</b>`; }
 function setToolRound(n) {
   const el = document.getElementById("tool-round");
   if (!el) return;
-  if (n > 1) {
-    el.textContent = `· tool round ${n}`;
-    el.classList.remove("hidden");
-  } else {
-    el.classList.add("hidden");
-  }
+  if (n > 1) { el.textContent = `· tool round ${n}`; el.classList.remove("hidden"); }
+  else el.classList.add("hidden");
 }
 
 function escapeHtml(s) {
@@ -572,10 +838,6 @@ function renderDiff(oldText, newText) {
     `<span class="diff-line diff-${op.type}">${DIFF_MARK[op.type]} ${escapeHtml(op.text)}</span>`
   ).join("\n") + `</pre>`;
 }
-// Two-pane variant of the same diff: left pane is the old code with removed
-// lines marked red (added lines omitted — they don't exist in the old
-// version), right pane is the new code with added lines marked green
-// (removed lines omitted). Used for side-by-side compare mode.
 function renderDiffPane(oldText, newText, side) {
   const ops = diffLines(oldText, newText);
   const keep = side === "left" ? (t) => t !== "add" : (t) => t !== "remove";
@@ -601,22 +863,22 @@ function failCasesHtml(at) {
 // those two attempts (not just each vs. its immediate predecessor).
 // ---------------------------------------------------------------------------
 let lastResult = null;
-let openAttempts = []; // attempt_no values, in the order they were opened
+let openAttempts = [];
 
 function renderResult(result) {
   setStatus(result.passed ? "passed" : "failed");
   lastResult = result;
   openAttempts = [];
+  finalizeLogGroups(result);
   renderAttempts();
 }
 
 function toggleAttempt(attemptNo) {
   const idx = openAttempts.indexOf(attemptNo);
-  if (idx !== -1) {
-    openAttempts.splice(idx, 1);
-  } else {
+  if (idx !== -1) openAttempts.splice(idx, 1);
+  else {
     openAttempts.push(attemptNo);
-    if (openAttempts.length > 2) openAttempts.shift(); // cap at 2, evict oldest
+    if (openAttempts.length > 2) openAttempts.shift();
   }
   renderAttempts();
 }
@@ -691,7 +953,6 @@ function renderAttempts() {
 
   html += `</div>`;
   el.innerHTML = html;
-
   el.querySelectorAll(".head[data-attempt]").forEach((headEl) => {
     headEl.addEventListener("click", () => toggleAttempt(parseInt(headEl.dataset.attempt, 10)));
   });
@@ -708,7 +969,6 @@ async function loadKatas() {
   katas = await res.json();
   const sel = document.getElementById("kata-select");
   sel.innerHTML = katas.map((k) => `<option value="${k.id}">${k.title}</option>`).join("");
-  // default to binary_search — the one that shows the retry story
   if (katas.some((k) => k.id === "binary_search")) sel.value = "binary_search";
   updateKataMeta();
 }
@@ -724,15 +984,26 @@ function resetBoard() {
   currentRunEvents = [];
   toolRoundInAttempt = 0;
   lastToolModelInitiated = false;
+  plannerJustRan = false;
+  currentAttemptNo = 0;
+  currentSubagentRole = null;
+  retryLoopCount = 0; sameplanLoopCount = 0; toolLoopCount = 0;
   closeModal();
-  resetRing();
-  setNode("orchestrator", "idle");
-  nodeEls.tools.classList.remove("selfcheck");
-  nodeEls.sandbox.classList.remove("selfcheck");
+
+  currentMode = document.getElementById("mode-select").value;
+  buildBoard(currentMode);
+  resetNodes();
+  setLoopBadge("retry", "");
+  setLoopBadge("sameplan", "");
+  setLoopBadge("toolloop", "");
+
+  logGroups = {};
+  currentLogGroupNo = null;
+
   modelThink(false);
-  modelEl.classList.remove("warnflash");
+  modelDotEl.classList.remove("warnflash");
   setModelInfo("swappable LLM", "");
-  packet.classList.remove("retry", "toolloop");
+  packet.classList.remove("retry", "sameplan", "toolloop");
   packet.classList.add("hidden");
   for (const c of Object.values(conns)) c.el.classList.remove("flowing", "traveled");
   logEl.innerHTML = '<div class="empty">Connecting…</div>';
@@ -758,6 +1029,7 @@ async function solve() {
       body: JSON.stringify({
         kata_id: document.getElementById("kata-select").value,
         max_attempts: parseInt(document.getElementById("max-attempts").value, 10) || 3,
+        mode: document.getElementById("mode-select").value,
       }),
     });
     if (!res.ok) {
@@ -783,8 +1055,6 @@ async function solve() {
     const data = JSON.parse(msg.data);
     if (data.final) {
       es.close();
-      // Render the verdict as the final queued action so it lands after the
-      // flow animation has played through to the oracle.
       pushAction(async () => {
         const r = await fetch(`/runs/${runId}`).then((x) => x.json());
         if (r.status === "done") renderResult(r.result);
@@ -804,5 +1074,70 @@ async function solve() {
 
 document.getElementById("kata-select").addEventListener("change", updateKataMeta);
 document.getElementById("solve-btn").addEventListener("click", solve);
-buildBoard();
+buildBoard("single");
+
+// ---------------------------------------------------------------------------
+// History view (P14 dashboard) — pass rate + retry distribution per kata,
+// plus a raw recent-attempts table. Reads GET /stats + GET /history.
+// ---------------------------------------------------------------------------
+function statsCardHtml(kataId, s) {
+  const pct = Math.round(s.pass_rate * 100);
+  return `<div class="stat-card">
+    <div class="stat-kata">${escapeHtml(kataId)}</div>
+    <div class="stat-row">${s.attempt_count} attempt(s) recorded · max attempt_no ${s.max_attempt_no}</div>
+    <div class="stat-row">${pct}% pass rate</div>
+    <div class="stat-bar"><div class="stat-bar-fill" style="width:${pct}%"></div></div>
+  </div>`;
+}
+
+function historyRowHtml(row) {
+  const when = new Date(row.created_at * 1000).toLocaleString();
+  return `<tr>
+    <td>${escapeHtml(row.kata_id)}</td>
+    <td>${escapeHtml(row.kata_category)}</td>
+    <td>${row.attempt_no}</td>
+    <td class="${row.passed ? "pass" : "fail"}">${row.passed ? "pass" : "fail"}</td>
+    <td>${row.tokens_used}</td>
+    <td>${escapeHtml(row.failure_reason || "—")}</td>
+    <td>${when}</td>
+  </tr>`;
+}
+
+async function loadHistory() {
+  const statsEl = document.getElementById("stats-grid");
+  const tableEl = document.getElementById("history-table");
+  statsEl.innerHTML = `<div class="empty">Loading…</div>`;
+  tableEl.innerHTML = `<div class="empty">Loading…</div>`;
+  try {
+    const [stats, history] = await Promise.all([
+      fetch("/stats").then((r) => r.json()),
+      fetch("/history").then((r) => r.json()),
+    ]);
+
+    const kataIds = Object.keys(stats.per_kata);
+    statsEl.innerHTML = kataIds.length
+      ? kataIds.map((id) => statsCardHtml(id, stats.per_kata[id])).join("")
+      : `<div class="empty">No runs recorded yet — solve a kata first.</div>`;
+
+    tableEl.innerHTML = history.length
+      ? `<table class="history-table">
+          <thead><tr><th>kata</th><th>category</th><th>attempt</th><th>verdict</th><th>tokens</th><th>failure reason</th><th>when</th></tr></thead>
+          <tbody>${history.map(historyRowHtml).join("")}</tbody>
+        </table>`
+      : `<div class="empty">No attempts recorded yet.</div>`;
+  } catch (e) {
+    statsEl.innerHTML = `<div class="empty">Failed to load history: ${e}</div>`;
+    tableEl.innerHTML = "";
+  }
+}
+
+function showView(view) {
+  document.getElementById("view-run").classList.toggle("hidden", view !== "run");
+  document.getElementById("view-history").classList.toggle("hidden", view !== "history");
+  document.getElementById("tab-run").classList.toggle("active", view === "run");
+  document.getElementById("tab-history").classList.toggle("active", view === "history");
+  if (view === "history") loadHistory();
+}
+document.getElementById("tab-run").addEventListener("click", () => showView("run"));
+document.getElementById("tab-history").addEventListener("click", () => showView("history"));
 loadKatas();

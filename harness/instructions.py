@@ -10,6 +10,7 @@ they're harmless to a real LLM (just more prompt text) but let
 """
 from __future__ import annotations
 
+from harness.context.failure_formatter import FailureFormatter
 from harness.models import Message, RunContext
 
 _SYSTEM_TEMPLATE = """You are a careful Python programmer solving a coding kata.
@@ -29,6 +30,9 @@ Rules:
 
 
 class InstructionBuilder:
+    def __init__(self, failure_formatter: FailureFormatter | None = None):
+        self._failure_formatter = failure_formatter or FailureFormatter()
+
     def build(self, context: RunContext, tool_schemas: list | None = None) -> list[Message]:
         # Tool descriptions are generated from the same ToolSchema objects
         # the provider uses for real function-calling, so the prompt can
@@ -61,24 +65,7 @@ class InstructionBuilder:
             ))
             messages.append(Message(
                 role="user",
-                content=self._format_failure(record),
+                content=self._failure_formatter.format(record),
             ))
 
         return messages
-
-    def _format_failure(self, record) -> str:
-        report = record.report
-        lines = ["That attempt failed verification. Fix the function.", ""]
-        for fc in report.failed_cases[:5]:
-            if fc.error:
-                lines.append(f"- input={fc.input!r} raised: {fc.error}")
-            else:
-                lines.append(
-                    f"- input={fc.input!r} expected={fc.expected!r} got={fc.actual!r}"
-                )
-        if report.exec_result and report.exec_result.stderr:
-            stderr_excerpt = report.exec_result.stderr.strip().splitlines()[-5:]
-            lines.append("")
-            lines.append("stderr (last lines):")
-            lines.extend(stderr_excerpt)
-        return "\n".join(lines)

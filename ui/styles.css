@@ -107,43 +107,75 @@ select:focus, input:focus { border-color: var(--accent); }
 .panel-head h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); }
 .hint { font-size: 11px; color: var(--faint); }
 
-/* ---------- stage / svg ---------- */
+/* ---------- stage / model strip ---------- */
+.stage { width: 100%; }
+
+.model-strip {
+  display: flex; align-items: center; gap: 10px; padding: 9px 14px; margin-bottom: 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+  font-size: 12.5px; color: var(--muted);
+}
+.model-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--idle);
+  border: 1.5px solid var(--border); flex: none; transition: all .3s ease;
+}
+.model-dot.think {
+  background: radial-gradient(circle, #cddaff, var(--accent));
+  border-color: var(--accent); box-shadow: 0 0 10px rgba(110,168,254,0.8);
+  animation: dotPulse 1s ease-in-out infinite;
+}
+@keyframes dotPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.35); } }
+.model-label { font-size: 10px; letter-spacing: 1.5px; color: var(--faint); font-weight: 700; }
+.model-name { color: var(--text); font-weight: 640; }
+.model-stat { color: var(--faint); margin-left: auto; }
+
+/* ---------- flowchart: a fixed diagram — loops are real loop-back edges
+   with live counters, not repeated rows or repeated ring travel. ---------- */
 .stage { width: 100%; }
 #board { width: 100%; height: auto; display: block; }
 
-.conn { fill: none; stroke: #2a3145; stroke-width: 2.2; stroke-linecap: round; transition: stroke .3s ease; }
-.conn.spur { stroke-dasharray: 2 7; stroke: #364063; }
-.conn.retry { stroke-dasharray: 6 8; stroke: #3a2f52; }
-.conn.toolloop { stroke-dasharray: 3 5; stroke: #3d3418; }
+.conn { fill: none; stroke: #3b465f; stroke-width: 2.2; stroke-linecap: round; marker-end: url(#arrowMain); transition: stroke .3s ease; }
+.conn.retry { stroke: #4a3d6b; stroke-dasharray: 7 7; marker-end: url(#arrowRetry); }
+.conn.sameplan { stroke: #1f5872; stroke-dasharray: 5 6; marker-end: url(#arrowSameplan); }
+.conn.toolloop { stroke: #6b5a1f; stroke-dasharray: 3 5; marker-end: url(#arrowToolloop); }
 .conn.flowing { stroke: var(--accent); stroke-width: 3; filter: drop-shadow(0 0 6px rgba(110,168,254,0.7)); animation: dash 0.7s linear infinite; }
 .conn.retry.flowing { stroke: var(--accent2); filter: drop-shadow(0 0 6px rgba(167,139,250,0.7)); }
+.conn.sameplan.flowing { stroke: #38bdf8; filter: drop-shadow(0 0 6px rgba(56,189,248,0.7)); }
 .conn.toolloop.flowing { stroke: var(--exec); filter: drop-shadow(0 0 6px rgba(251,191,36,0.7)); }
-.conn.traveled { stroke: #3b465f; }
+.conn.traveled { stroke: #48536e; }
+.conn.retry.traveled { stroke: #4a3d6b; }
+.conn.sameplan.traveled { stroke: #1f5872; }
+.conn.toolloop.traveled { stroke: #6b5a1f; }
 @keyframes dash { to { stroke-dashoffset: -30; } }
 
-/* nodes (built in JS) */
-.node { cursor: pointer; }
-.node .box {
-  fill: var(--idle); stroke: var(--border); stroke-width: 1.4;
-  transition: fill .3s ease, stroke .3s ease;
+/* Solid pill behind each loop counter so it reads cleanly no matter what
+   crosses behind it (an edge, another lane) — sized to the text via
+   getBBox() in setLoopBadge(), not a fixed guessed width. */
+.loop-badge-bg { fill: var(--panel2); stroke-width: 1.4; transition: width .15s ease, height .15s ease, x .15s ease; }
+.loop-badge-bg-retry { stroke: #4a3d6b; }
+.loop-badge-bg-sameplan { stroke: #1f5872; }
+.loop-badge-bg-toolloop { stroke: #6b5a1f; }
+.loop-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 700;
 }
+.loop-badge-retry { fill: var(--accent2); }
+.loop-badge-sameplan { fill: #38bdf8; }
+.loop-badge-toolloop { fill: var(--exec); }
+
+.node { cursor: pointer; }
+.node .box { fill: var(--idle); stroke: var(--border); stroke-width: 1.4; transition: fill .3s ease, stroke .3s ease; }
 .node:hover .box { stroke: #4a5578; }
 .node:hover .title { fill: #fff; }
 .node .title { fill: var(--text); font-size: 13px; font-weight: 640; }
 .node .tag { fill: var(--faint); font-size: 9.5px; letter-spacing: 0.3px; }
-.node .pnum {
-  fill: var(--faint); font-size: 9px; font-weight: 700;
-}
+.node .pnum { fill: var(--faint); font-size: 9px; font-weight: 700; }
 .node { transition: filter .3s ease; }
 
 .node.active .box { fill: #17213b; stroke: var(--accent); stroke-width: 2; }
 .node.active { filter: drop-shadow(0 0 12px rgba(110,168,254,0.55)); }
 .node.active .title { fill: #dbe6ff; }
 .node.active .box { animation: nodePulse 1.1s ease-in-out infinite; }
-@keyframes nodePulse {
-  0%,100% { stroke-opacity: 1; }
-  50% { stroke-opacity: 0.45; }
-}
+@keyframes nodePulse { 0%,100% { stroke-opacity: 1; } 50% { stroke-opacity: 0.45; } }
 .node.exec .box { fill: #2a2312; stroke: var(--exec); }
 .node.exec { filter: drop-shadow(0 0 12px rgba(251,191,36,0.5)); }
 .node.done .box { fill: #10231c; stroke: var(--ok); }
@@ -152,39 +184,16 @@ select:focus, input:focus { border-color: var(--accent); }
 .node.warn { filter: drop-shadow(0 0 12px rgba(251,113,133,0.5)); }
 .node.warn .title { fill: #ffd7de; }
 
-/* model core */
-.model .core-body { transition: filter .3s ease; }
-.model .core-ring { fill: none; stroke: rgba(140,170,255,0.25); stroke-width: 1.5; }
-.model .core-ring.r2 { stroke: rgba(140,170,255,0.15); }
-.model .core-halo { opacity: 0.5; transition: opacity .4s ease; }
-.model.idle .core-halo { opacity: 0.28; }
-.core-label { text-align: center; font-family: inherit; color: #eaf0ff; user-select: none; }
-.core-title { font-size: 14px; font-weight: 750; letter-spacing: 2px; }
-.core-sub { font-size: 10.5px; color: #c3ccf0; margin-top: 2px; }
-.core-stat { font-size: 9.5px; color: #9fb0ec; margin-top: 3px; min-height: 12px; }
-.model .core-ring { transform-origin: 500px 340px; }
-.model.think .core-ring.r1 { animation: spin 3.2s linear infinite; stroke: rgba(150,180,255,0.6); }
-.model.think .core-ring.r2 { animation: spin 4.6s linear infinite reverse; stroke: rgba(167,139,250,0.5); }
-.model.think .core-halo { opacity: 0.85; animation: breathe 1.4s ease-in-out infinite; }
-.model.think .core-body { filter: drop-shadow(0 0 22px rgba(120,150,255,0.75)); }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes breathe { 0%,100% { opacity: 0.55; } 50% { opacity: 0.95; } }
-.model.warnflash .core-body { filter: drop-shadow(0 0 22px rgba(251,191,36,0.85)); }
-
-/* packet */
 .packet { transition: opacity .25s ease; }
 .packet.hidden { opacity: 0; }
 .packet-core { filter: drop-shadow(0 0 8px rgba(150,190,255,0.95)); }
 .packet-halo { fill: rgba(120,160,255,0.28); }
 .packet.retry .packet-core { filter: drop-shadow(0 0 8px rgba(190,160,255,0.95)); }
 .packet.retry .packet-halo { fill: rgba(180,150,255,0.28); }
+.packet.sameplan .packet-core { filter: drop-shadow(0 0 8px rgba(56,189,248,0.95)); }
+.packet.sameplan .packet-halo { fill: rgba(56,189,248,0.28); }
 .packet.toolloop .packet-core { filter: drop-shadow(0 0 8px rgba(251,191,36,0.95)); }
 .packet.toolloop .packet-halo { fill: rgba(251,191,36,0.28); }
-
-/* self-check: the MODEL chose to call this tool mid-attempt, distinct from
-   the harness's own final authoritative run_tests check on the same nodes */
-.node.selfcheck.active .box, .node.selfcheck.exec .box { stroke: var(--exec); }
-.node.selfcheck.active, .node.selfcheck.exec { filter: drop-shadow(0 0 12px rgba(251,191,36,0.55)); }
 
 /* legend */
 .legend {
@@ -198,12 +207,50 @@ select:focus, input:focus { border-color: var(--accent); }
 .sw.done { background: #10231c; border-color: var(--ok); }
 .sw.warn { background: #2a1620; border-color: var(--warn); }
 .sw.retry { background: #241d38; border-color: var(--accent2); }
-.sw.selfcheck { background: #2a2312; border-color: var(--exec); }
+.sw.sameplan { background: #112733; border-color: #38bdf8; }
+.sw.toolloop { background: #2a2312; border-color: var(--exec); }
 .tracer-note { margin-left: auto; color: var(--faint); font-style: italic; }
 
-/* ---------- log ---------- */
-#log { height: 520px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.log-line { display: flex; gap: 8px; padding: 5px 7px; border-bottom: 1px solid rgba(33,38,54,0.7); align-items: baseline; }
+/* ---------- story feed: narrated in plain English, grouped by attempt,
+   current expanded, past collapsed. Raw events still one click away. ---------- */
+#log { height: 640px; overflow-y: auto; font-size: 12.5px; }
+
+.log-group { border-bottom: 1px solid var(--border); }
+.log-group-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 9px; cursor: pointer; user-select: none;
+  background: var(--panel2); position: sticky; top: 0; z-index: 1;
+}
+.log-group-head:hover { background: #171c2a; }
+.log-group-title { font-weight: 650; font-size: 12px; color: var(--text); font-family: -apple-system, sans-serif; }
+.log-group-badge {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 700;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--faint);
+}
+.log-group-badge.running { color: var(--accent); border-color: rgba(110,168,254,0.4); }
+.log-group-badge.pass { color: var(--ok); border-color: rgba(52,211,153,0.4); }
+.log-group-badge.fail { color: var(--warn); border-color: rgba(251,113,133,0.4); }
+.log-group-count { color: var(--faint); font-size: 11px; margin-left: auto; font-family: ui-monospace, monospace; }
+.log-group-chev { font-size: 9px; color: var(--muted); transition: transform .15s ease; }
+.log-group.collapsed .log-group-chev { transform: rotate(-90deg); }
+.log-group.collapsed .log-group-body { display: none; }
+
+.story-list { padding: 4px 0; }
+.story-line {
+  display: flex; gap: 9px; padding: 7px 12px; cursor: pointer; align-items: flex-start;
+  font-family: -apple-system, sans-serif; line-height: 1.4;
+}
+.story-line:hover { background: rgba(110,168,254,0.06); }
+.story-icon { flex: none; font-size: 13px; margin-top: 1px; }
+.story-text { color: var(--text); }
+
+.raw-toggle {
+  font-size: 10.5px; color: var(--faint); padding: 6px 12px; cursor: pointer;
+  font-family: ui-monospace, monospace; border-top: 1px dashed var(--border); margin-top: 2px;
+}
+.raw-toggle:hover { color: var(--muted); }
+.raw-list.hidden { display: none; }
+
+.log-line { display: flex; gap: 8px; padding: 5px 7px 5px 20px; border-bottom: 1px solid rgba(33,38,54,0.7); align-items: baseline; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .log-line .st { width: 52px; flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
 .log-line .st.started { color: var(--accent); }
 .log-line .st.ok { color: var(--ok); }
@@ -354,3 +401,32 @@ select:focus, input:focus { border-color: var(--accent); }
   #log { height: 320px; }
   .run-controls { flex-wrap: wrap; }
 }
+
+/* ---------- view tabs (P8 full: Live run vs History) ---------- */
+.view-tabs { display: flex; gap: 6px; }
+.tab {
+  background: transparent; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+}
+.tab.active { color: var(--text); background: var(--idle); border-color: var(--accent); }
+.hidden { display: none !important; }
+
+/* ---------- history view (P14 dashboard) ---------- */
+.history-layout { grid-template-columns: 1fr; grid-template-areas: "history"; }
+.history-panel { grid-area: history; }
+.stats-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.stat-card {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+  padding: 12px 16px; min-width: 160px;
+}
+.stat-card .stat-kata { font-size: 13px; font-weight: 650; color: var(--text); }
+.stat-card .stat-row { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.stat-card .stat-bar { height: 6px; border-radius: 3px; background: var(--idle); margin-top: 6px; overflow: hidden; }
+.stat-card .stat-bar-fill { height: 100%; background: var(--ok); }
+table.history-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.history-table th, table.history-table td {
+  text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border);
+}
+table.history-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.4px; }
+table.history-table td.pass { color: var(--ok); }
+table.history-table td.fail { color: var(--warn); }

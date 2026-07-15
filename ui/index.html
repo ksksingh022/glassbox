@@ -17,12 +17,20 @@
   </div>
   <div class="run-controls">
     <select id="kata-select" aria-label="kata"></select>
+    <select id="mode-select" aria-label="orchestration mode">
+      <option value="single">single agent</option>
+      <option value="multi">multi agent (planner/coder/tester)</option>
+    </select>
     <label class="attempts">max attempts
       <input id="max-attempts" type="number" min="1" max="6" value="3" />
     </label>
     <button id="solve-btn">
       <span class="btn-dot"></span> Solve
     </button>
+  </div>
+  <div class="view-tabs">
+    <button id="tab-run" class="tab active">Live run</button>
+    <button id="tab-history" class="tab">History</button>
   </div>
 </header>
 
@@ -34,52 +42,44 @@
   <span class="tool-round hidden" id="tool-round"></span>
 </div>
 
-<main class="layout">
+<main class="layout" id="view-run">
   <section class="panel stage-panel">
     <div class="panel-head">
       <h2>Harness</h2>
-      <span class="hint">the ring is the harness · the core is the model · click any node for its input/output</span>
+      <span class="hint">a fixed flow — loops are real loop-back arrows with live counters, not repeated boxes · click any node for its input/output</span>
+    </div>
+    <div class="model-strip">
+      <span class="model-dot" id="model-dot"></span>
+      <span class="model-label">MODEL</span>
+      <span class="model-name" id="model-name">swappable LLM</span>
+      <span class="model-stat" id="model-stat"></span>
     </div>
     <div class="stage">
-      <svg id="board" viewBox="0 0 1000 680" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flow">
+      <svg id="board" viewBox="0 0 1020 800" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flowchart">
         <defs>
-          <radialGradient id="coreGrad" cx="50%" cy="42%" r="65%">
-            <stop offset="0%" stop-color="#9db4ff"/>
-            <stop offset="55%" stop-color="#5f74e6"/>
-            <stop offset="100%" stop-color="#3b45a8"/>
-          </radialGradient>
-          <radialGradient id="haloGrad" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stop-color="rgba(140,170,255,0.55)"/>
-            <stop offset="100%" stop-color="rgba(140,170,255,0)"/>
-          </radialGradient>
+          <marker id="arrowMain" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#3b465f"></path>
+          </marker>
+          <marker id="arrowRetry" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"></path>
+          </marker>
+          <marker id="arrowSameplan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"></path>
+          </marker>
+          <marker id="arrowToolloop" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"></path>
+          </marker>
           <linearGradient id="packetGrad" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0%" stop-color="#bcd0ff"/>
             <stop offset="100%" stop-color="#6ea8fe"/>
           </linearGradient>
         </defs>
-
         <g id="conns"></g>
-
-        <!-- central model core -->
-        <g id="model" class="model idle">
-          <circle class="core-halo" cx="500" cy="340" r="118" fill="url(#haloGrad)"></circle>
-          <circle class="core-ring r1" cx="500" cy="340" r="92"></circle>
-          <circle class="core-ring r2" cx="500" cy="340" r="80"></circle>
-          <circle class="core-body" cx="500" cy="340" r="72" fill="url(#coreGrad)"></circle>
-          <foreignObject x="418" y="300" width="164" height="90">
-            <div xmlns="http://www.w3.org/1999/xhtml" class="core-label">
-              <div class="core-title">MODEL</div>
-              <div class="core-sub" id="model-name">swappable LLM</div>
-              <div class="core-stat" id="model-stat"></div>
-            </div>
-          </foreignObject>
-        </g>
-
+        <g id="loop-badges"></g>
         <g id="nodes"></g>
-
         <g id="packet" class="packet hidden">
-          <circle class="packet-halo" r="17"></circle>
-          <circle class="packet-core" r="7" fill="url(#packetGrad)"></circle>
+          <circle class="packet-halo" r="15"></circle>
+          <circle class="packet-core" r="6" fill="url(#packetGrad)"></circle>
         </g>
       </svg>
     </div>
@@ -89,19 +89,31 @@
       <span><i class="sw done"></i> done</span>
       <span><i class="sw warn"></i> failed</span>
       <span><i class="sw retry"></i> retry loop (new attempt)</span>
-      <span><i class="sw selfcheck"></i> model self-check (tool loop, same attempt)</span>
-      <span class="tracer-note">every edge is instrumented by the Tracer (P7)</span>
+      <span><i class="sw sameplan"></i> same-plan retry (no replan)</span>
+      <span><i class="sw toolloop"></i> model asked again mid-attempt</span>
+      <span class="tracer-note">every node/edge is instrumented by the Tracer (P7)</span>
     </div>
   </section>
 
   <aside class="panel log-panel">
-    <div class="panel-head"><h2>Live trace</h2><span class="hint" id="log-count"></span></div>
+    <div class="panel-head"><h2>Story</h2><span class="hint" id="log-count"></span></div>
     <div id="log"><div class="empty">No events yet — pick a kata and hit Solve.</div></div>
   </aside>
 
   <section class="panel result-panel">
     <div class="panel-head"><h2>Result</h2><span class="hint">expand any two attempts to compare side by side</span></div>
     <div id="result"><div class="empty">Attempts and verdict appear here.</div></div>
+  </section>
+</main>
+
+<main class="layout history-layout hidden" id="view-history">
+  <section class="panel history-panel">
+    <div class="panel-head">
+      <h2>History (P14)</h2>
+      <span class="hint">durable attempt log — SQLite, survives a process restart</span>
+    </div>
+    <div id="stats-grid" class="stats-grid"><div class="empty">Loading…</div></div>
+    <div id="history-table"><div class="empty">Loading…</div></div>
   </section>
 </main>
 
