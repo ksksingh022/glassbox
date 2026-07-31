@@ -42,6 +42,10 @@ class RunTestsTool(Tool):
     def run(self, **kwargs) -> ToolResult:
         code: str = kwargs["code"]
         kata: Kata = kwargs["kata"]
+        # Optional case subset — lets the Tester verify the ground-truth tier
+        # and the generated tier separately, since only the former decides
+        # pass/fail (see the authority ladder in DECISIONS.md).
+        cases = kwargs.get("cases")
 
         def exec_fn(script: str):
             with self._tracer.span(
@@ -59,11 +63,17 @@ class RunTestsTool(Tool):
                 span.set_attr("stderr", _cap(result.stderr))
                 return result
 
+        selected = kata.test_cases if cases is None else cases
         with self._tracer.span(
             "verification", kind="verification",
-            attrs={"kata_id": kata.id, "code": code, "test_case_count": len(kata.test_cases)},
+            attrs={
+                "kata_id": kata.id, "code": code, "test_case_count": len(selected),
+                "case_tier": "mixed" if cases is None else (
+                    selected[0].source if selected else "empty"
+                ),
+            },
         ) as span:
-            report = self._oracle.verify(kata, code, exec_fn)
+            report = self._oracle.verify(kata, code, exec_fn, cases=selected)
             span.set_attr("oracle_passed", report.oracle_passed)
             span.set_attr("score", report.score)
             span.set_attr("failed_case_count", len(report.failed_cases))

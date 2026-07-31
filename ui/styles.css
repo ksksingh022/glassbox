@@ -48,12 +48,14 @@ body {
 .brand h1 { margin: 0; font-size: 19px; letter-spacing: 0.4px; }
 .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
 
-.run-controls { display: flex; align-items: center; gap: 12px; }
-select, input[type=number] {
+.run-controls { display: flex; align-items: center; gap: 12px; flex: 1; max-width: 720px; }
+select, input[type=number], input[type=text] {
   background: var(--idle); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 9px 11px; font-size: 14px; outline: none;
 }
 select:focus, input:focus { border-color: var(--accent); }
+#problem-ref { flex: 1; min-width: 240px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+#problem-ref::placeholder { color: var(--faint); }
 .attempts { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
 .attempts input { width: 58px; }
 #solve-btn {
@@ -88,15 +90,109 @@ select:focus, input:focus { border-color: var(--accent); }
 .tool-round { color: var(--exec); font-size: 12px; }
 .tool-round.hidden { display: none; }
 
+/* ---------- quick picks ---------- */
+.quickpicks {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 9px 26px; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.qp-label { color: var(--faint); text-transform: uppercase; letter-spacing: 0.6px; font-size: 10px; }
+.qp {
+  cursor: pointer; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--idle); color: var(--muted);
+  transition: all .15s ease;
+}
+.qp:hover { border-color: var(--accent); color: var(--text); }
+.qp i { font-style: normal; font-size: 9.5px; color: var(--warn); margin-left: 4px; text-transform: uppercase; }
+.qp.offline i { color: var(--faint); }
+
 /* ---------- layout ---------- */
 .layout {
-  display: grid; grid-template-columns: minmax(0,1fr) 350px;
-  grid-template-areas: "stage log" "result log";
-  gap: 18px; padding: 18px 26px; max-width: 1500px; margin: 0 auto;
+  display: grid; grid-template-columns: minmax(0,1fr) 380px;
+  grid-template-areas: "problem log" "stage log" "metrics log" "result log";
+  gap: 18px; padding: 18px 26px; max-width: 1560px; margin: 0 auto;
+  align-items: start;
 }
+.problem-panel { grid-area: problem; }
 .stage-panel { grid-area: stage; }
-.log-panel { grid-area: log; }
+.metrics-panel { grid-area: metrics; }
+.log-panel { grid-area: log; position: sticky; top: 86px; }
 .result-panel { grid-area: result; }
+
+/* ---------- problem panel ---------- */
+.problem-title { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+.problem-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; align-items: center; }
+.tag-chip {
+  font-size: 10.5px; padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); background: var(--idle);
+}
+.tag-chip.easy { color: var(--ok); border-color: rgba(52,211,153,0.4); }
+.tag-chip.medium { color: var(--exec); border-color: rgba(251,191,36,0.4); }
+.tag-chip.hard { color: var(--warn); border-color: rgba(251,113,133,0.4); }
+.tag-chip.kind { color: var(--accent2); border-color: rgba(167,139,250,0.4); }
+.problem-link { font-size: 11px; color: var(--accent); text-decoration: none; margin-left: auto; }
+.problem-link:hover { text-decoration: underline; }
+
+.statement {
+  font-size: 13px; line-height: 1.62; color: #c8cfe2; max-height: 260px;
+  overflow-y: auto; padding: 12px 14px; border: 1px solid var(--border);
+  border-radius: 10px; background: #0b0e15; white-space: pre-wrap;
+}
+.statement.collapsed { max-height: 120px; }
+.statement-toggle { font-size: 11px; color: var(--accent); cursor: pointer; margin-top: 6px; display: inline-block; }
+.statement-toggle:hover { text-decoration: underline; }
+
+.section-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px;
+  color: var(--muted); margin: 16px 0 8px; font-weight: 650;
+}
+.constraint-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.constraint-list code { color: #cbd6f0; }
+
+.budget-card {
+  border: 1px solid rgba(167,139,250,0.35); background: rgba(167,139,250,0.06);
+  border-radius: 10px; padding: 11px 14px; font-size: 12.5px;
+}
+.budget-target { font-weight: 700; color: var(--accent2); font-size: 14px; font-family: ui-monospace, monospace; }
+.budget-why { color: var(--muted); margin-top: 4px; font-size: 11.5px; }
+.budget-slow { color: var(--warn); font-size: 11.5px; margin-top: 3px; font-family: ui-monospace, monospace; }
+
+table.cases { width: 100%; border-collapse: collapse; font-size: 11.5px; font-family: ui-monospace, monospace; }
+table.cases th, table.cases td { text-align: left; padding: 5px 8px; border-bottom: 1px solid rgba(33,38,54,0.8); vertical-align: top; }
+table.cases th { color: var(--muted); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; font-family: -apple-system, sans-serif; }
+table.cases td.val { color: #cbd6f0; word-break: break-all; max-width: 210px; }
+.tier {
+  font-size: 9px; padding: 1px 6px; border-radius: 4px; text-transform: uppercase;
+  letter-spacing: 0.4px; font-weight: 700; font-family: -apple-system, sans-serif;
+}
+.tier.official, .tier.curated { color: var(--ok); background: rgba(52,211,153,0.12); }
+.tier.generated { color: var(--exec); background: rgba(251,191,36,0.12); }
+.case-rationale { color: var(--faint); font-size: 10.5px; font-family: -apple-system, sans-serif; }
+
+/* ---------- metrics panel ---------- */
+.metric-grid { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.metric {
+  flex: 1; min-width: 118px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel2); padding: 11px 13px;
+}
+.metric-value { font-size: 19px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.metric-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--faint); margin-top: 3px; }
+.metric-sub { font-size: 10.5px; color: var(--muted); margin-top: 3px; }
+.metric.highlight .metric-value { color: var(--accent2); }
+
+.split-bar { display: flex; height: 22px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+.split-seg { display: flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 700; color: #0b0e15; min-width: 0; }
+.split-seg.llm { background: var(--accent); }
+.split-seg.sandbox { background: var(--exec); }
+.split-seg.other { background: #3f4a63; color: #c8cfe2; }
+.split-key { display: flex; gap: 14px; margin-top: 7px; font-size: 10.5px; color: var(--muted); flex-wrap: wrap; }
+.split-key i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+table.agents { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+table.agents th, table.agents td { text-align: right; padding: 5px 8px; border-bottom: 1px solid rgba(33,38,54,0.8); }
+table.agents th:first-child, table.agents td:first-child { text-align: left; }
+table.agents th { color: var(--muted); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+table.agents td { font-variant-numeric: tabular-nums; color: #cbd6f0; font-family: ui-monospace, monospace; }
+table.agents td.role { color: var(--text); font-family: -apple-system, sans-serif; font-weight: 600; }
 
 .panel {
   background: linear-gradient(180deg, var(--panel), var(--bg2));
@@ -132,7 +228,11 @@ select:focus, input:focus { border-color: var(--accent); }
 /* ---------- flowchart: a fixed diagram — loops are real loop-back edges
    with live counters, not repeated rows or repeated ring travel. ---------- */
 .stage { width: 100%; }
-#board { width: 100%; height: auto; display: block; }
+/* Phase 4 added four prelude nodes, making the diagram tall enough (13 rows)
+   that at 100% width it would run to ~1400px and push the metrics panel off
+   screen. `preserveAspectRatio="…meet"` means capping the height just scales
+   the whole diagram down to fit instead of cropping it. */
+#board { width: 100%; height: auto; max-height: 68vh; display: block; margin: 0 auto; }
 
 .conn { fill: none; stroke: #3b465f; stroke-width: 2.2; stroke-linecap: round; marker-end: url(#arrowMain); transition: stroke .3s ease; }
 .conn.retry { stroke: #4a3d6b; stroke-dasharray: 7 7; marker-end: url(#arrowRetry); }
@@ -396,10 +496,14 @@ select:focus, input:focus { border-color: var(--accent); }
 }
 
 /* ---------- responsive ---------- */
-@media (max-width: 980px) {
-  .layout { grid-template-columns: 1fr; grid-template-areas: "stage" "result" "log"; }
-  #log { height: 320px; }
-  .run-controls { flex-wrap: wrap; }
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-areas: "problem" "stage" "metrics" "log" "result";
+  }
+  .log-panel { position: static; }
+  #log { height: 340px; }
+  .run-controls { flex-wrap: wrap; max-width: none; }
 }
 
 /* ---------- view tabs (P8 full: Live run vs History) ---------- */

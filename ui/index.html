@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Glassbox — Harness Visualizer</title>
+<title>Glassbox — Coding Agent Harness</title>
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,21 +12,19 @@
     <span class="logo" aria-hidden="true"></span>
     <div>
       <h1>Glassbox</h1>
-      <p>watch the request travel through every harness primitive</p>
+      <p>a small model + a real harness, solving problems it couldn't solve alone</p>
     </div>
   </div>
   <div class="run-controls">
-    <select id="kata-select" aria-label="kata"></select>
+    <input id="problem-ref" type="text" placeholder="leetcode 295, a URL, or paste a problem…" autocomplete="off" />
     <select id="mode-select" aria-label="orchestration mode">
+      <option value="multi">multi agent</option>
       <option value="single">single agent</option>
-      <option value="multi">multi agent (planner/coder/tester)</option>
     </select>
-    <label class="attempts">max attempts
+    <label class="attempts">attempts
       <input id="max-attempts" type="number" min="1" max="6" value="3" />
     </label>
-    <button id="solve-btn">
-      <span class="btn-dot"></span> Solve
-    </button>
+    <button id="solve-btn"><span class="btn-dot"></span> Solve</button>
   </div>
   <div class="view-tabs">
     <button id="tab-run" class="tab active">Live run</button>
@@ -34,19 +32,39 @@
   </div>
 </header>
 
+<div class="quickpicks">
+  <span class="qp-label">try:</span>
+  <span class="qp" data-ref="1">LC 1 · Two Sum</span>
+  <span class="qp" data-ref="20">LC 20 · Valid Parentheses</span>
+  <span class="qp" data-ref="42">LC 42 · Trapping Rain Water <i>hard</i></span>
+  <span class="qp" data-ref="295">LC 295 · Median from Data Stream <i>hard</i></span>
+  <span class="qp offline" data-ref="binary_search">binary_search <i>offline</i></span>
+  <span class="qp offline" data-ref="merge_intervals">merge_intervals <i>offline</i></span>
+</div>
+
 <div class="status-strip">
   <span id="status-pill" class="pill idle">idle</span>
-  <span class="meta" id="kata-meta"></span>
+  <span class="meta" id="problem-meta"></span>
   <span class="spacer"></span>
   <span class="attempt-counter" id="attempt-counter">attempt <b>—</b></span>
   <span class="tool-round hidden" id="tool-round"></span>
 </div>
 
 <main class="layout" id="view-run">
+  <!-- ---------- the question ---------- -->
+  <section class="panel problem-panel">
+    <div class="panel-head">
+      <h2>Problem</h2>
+      <span class="hint" id="problem-source"></span>
+    </div>
+    <div id="problem-body"><div class="empty">Enter a problem reference above, or pick one from the list.</div></div>
+  </section>
+
+  <!-- ---------- what the harness did ---------- -->
   <section class="panel stage-panel">
     <div class="panel-head">
       <h2>Harness</h2>
-      <span class="hint">a fixed flow — loops are real loop-back arrows with live counters, not repeated boxes · click any node for its input/output</span>
+      <span class="hint">loops are real loop-back arrows with live counters · click any node for its input/output</span>
     </div>
     <div class="model-strip">
       <span class="model-dot" id="model-dot"></span>
@@ -55,7 +73,7 @@
       <span class="model-stat" id="model-stat"></span>
     </div>
     <div class="stage">
-      <svg id="board" viewBox="0 0 1020 800" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flowchart">
+      <svg id="board" viewBox="0 0 740 720" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flowchart">
         <defs>
           <marker id="arrowMain" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="#3b465f"></path>
@@ -88,18 +106,28 @@
       <span><i class="sw active"></i> active</span>
       <span><i class="sw done"></i> done</span>
       <span><i class="sw warn"></i> failed</span>
-      <span><i class="sw retry"></i> retry loop (new attempt)</span>
-      <span><i class="sw sameplan"></i> same-plan retry (no replan)</span>
-      <span><i class="sw toolloop"></i> model asked again mid-attempt</span>
-      <span class="tracer-note">every node/edge is instrumented by the Tracer (P7)</span>
+      <span><i class="sw retry"></i> retry loop</span>
+      <span><i class="sw sameplan"></i> same-plan retry</span>
+      <span><i class="sw toolloop"></i> model asked again</span>
     </div>
   </section>
 
+  <!-- ---------- the numbers ---------- -->
+  <section class="panel metrics-panel">
+    <div class="panel-head">
+      <h2>Cost of solving</h2>
+      <span class="hint">where the time and tokens actually went</span>
+    </div>
+    <div id="metrics-body"><div class="empty">Metrics appear when the run finishes.</div></div>
+  </section>
+
+  <!-- ---------- the narration ---------- -->
   <aside class="panel log-panel">
     <div class="panel-head"><h2>Story</h2><span class="hint" id="log-count"></span></div>
-    <div id="log"><div class="empty">No events yet — pick a kata and hit Solve.</div></div>
+    <div id="log"><div class="empty">No events yet — pick a problem and hit Solve.</div></div>
   </aside>
 
+  <!-- ---------- the answer ---------- -->
   <section class="panel result-panel">
     <div class="panel-head"><h2>Result</h2><span class="hint">expand any two attempts to compare side by side</span></div>
     <div id="result"><div class="empty">Attempts and verdict appear here.</div></div>

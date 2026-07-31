@@ -16,9 +16,21 @@ def _parse(data: dict) -> Kata:
         prompt=data["prompt"],
         function_name=data["function_name"],
         function_signature=data["function_signature"],
-        test_cases=[TestCase(input=tc["input"], expected=tc["expected"]) for tc in data["test_cases"]],
+        # Hand-written cases are ground truth, same authority tier as
+        # LeetCode's own published examples (see the authority ladder in
+        # DECISIONS.md) — they set pass/fail outright.
+        test_cases=[
+            TestCase(input=tc["input"], expected=tc["expected"], source="curated")
+            for tc in data["test_cases"]
+        ],
         category=data["category"],
         difficulty=data["difficulty"],
+        kind=data.get("kind", "function"),
+        constraints=data.get("constraints", []),
+        max_n=data.get("max_n"),
+        topics=data.get("topics", []),
+        class_name=data.get("class_name", ""),
+        source_ref="curated",
     )
 
 

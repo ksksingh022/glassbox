@@ -12,6 +12,10 @@ const SVGNS = "http://www.w3.org/2000/svg";
 // show: the loop *structure* itself.
 // ---------------------------------------------------------------------------
 const NODE_META = {
+  fetch: { title: "Fetch", tag: "get the problem", p: "P15" },
+  extract: { title: "Extract", tag: "→ runnable spec", p: "P16" },
+  budget: { title: "Budget", tag: "constraints → Big-O", p: "P17" },
+  testgen: { title: "Test-gen", tag: "edge cases", p: "P18" },
   orchestrator: { title: "Orchestrator", tag: "loop + retry", p: "P6" },
   instructions: { title: "Instructions", tag: "prompt build", p: "P2" },
   planner: { title: "Planner", tag: "step plan", p: "P12" },
@@ -20,11 +24,15 @@ const NODE_META = {
   approval: { title: "Approval gate", tag: "run_tests", p: "P3" },
   tools: { title: "Tools", tag: "run_tests", p: "P3" },
   sandbox: { title: "Sandbox", tag: "subprocess", p: "P4" },
-  tester: { title: "Tester", tag: "oracle + edges", p: "P12" },
-  oracle: { title: "Oracle", tag: "verify", p: "P5" },
+  tester: { title: "Tester", tag: "verify", p: "P12" },
+  oracle: { title: "Oracle", tag: "ground truth", p: "P5" },
+  judge: { title: "Judge", tag: "bad test or real bug?", p: "P19" },
 };
-const ORDER_SINGLE = ["orchestrator", "instructions", "provider", "approval", "tools", "sandbox", "oracle"];
-const ORDER_MULTI = ["planner", "coder", "provider", "approval", "tools", "sandbox", "tester", "oracle"];
+// The Phase 4 prelude (fetch → extract → budget → test-gen) runs once per run
+// in both modes; solving differs.
+const PRELUDE = ["fetch", "extract", "budget", "testgen"];
+const ORDER_SINGLE = [...PRELUDE, "orchestrator", "instructions", "provider", "approval", "tools", "sandbox", "oracle"];
+const ORDER_MULTI = [...PRELUDE, "planner", "coder", "provider", "approval", "tools", "sandbox", "tester", "oracle", "judge"];
 // Nodes the model can be asked FROM as the first call of a fresh context
 // (a straight main-path edge into Provider). Any other source (Tools on a
 // tool-loop round, Tester's edge-case call) travels the loop-back edge.
@@ -195,6 +203,15 @@ function setNode(id, state) {
 }
 function resetNodes() { for (const id of currentOrder) setNode(id, "idle"); }
 
+// A retry re-runs the *solving* loop only. The prelude (fetch/extract/budget/
+// test-gen) happens once per run, so clearing it on every retry would wrongly
+// suggest the problem was re-fetched each time.
+function resetSolvingNodes() {
+  for (const id of currentOrder) {
+    if (!PRELUDE.includes(id)) setNode(id, "idle");
+  }
+}
+
 async function travel(from, to) {
   let conn = conns[`${from}->${to}`];
   let reverse = false;
@@ -304,12 +321,18 @@ async function runConsumer(myToken) {
 // ---------------------------------------------------------------------------
 let currentRunEvents = [];
 
+// The Phase 4 prelude kinds map 1:1 onto their own nodes in both modes.
+const KIND_TO_NODE_PRELUDE = {
+  fetch: "fetch", extract: "extract", budget: "budget", testgen: "testgen", judge: "judge",
+};
 const KIND_TO_NODE_SINGLE = {
+  ...KIND_TO_NODE_PRELUDE,
   instructions: "instructions", "gen_ai.completion": "provider", approval_gate: "approval",
   "gen_ai.tool": "tools", sandbox_exec: "sandbox", verification: "oracle",
   orchestrator: "orchestrator", run: "orchestrator",
 };
 const KIND_TO_NODE_MULTI = {
+  ...KIND_TO_NODE_PRELUDE,
   "gen_ai.completion": "provider", approval_gate: "approval",
   "gen_ai.tool": "tools", sandbox_exec: "sandbox", verification: "oracle",
   orchestrator: "planner", run: "planner",
@@ -454,6 +477,42 @@ function openInspector(nodeId) {
 // ---------------------------------------------------------------------------
 function narrate(evt) {
   const a = evt.attrs || {};
+
+  // ---- Phase 4 prelude: how the harness worked out what "correct" means ----
+  if (evt.kind === "fetch" && evt.status === "ok") {
+    if (a.ok === false) return { icon: "🚫", text: `Could not fetch the problem: ${a.error}` };
+    const diff = a.difficulty && a.difficulty !== "unknown" ? ` (${a.difficulty})` : "";
+    return { icon: "🌐", text: `Fetched "${a.title}"${diff} from ${a.source}.` };
+  }
+  if (evt.kind === "extract" && evt.status === "ok") {
+    const how = a.extraction_method === "deterministic"
+      ? "parsed straight out of the statement — no model call needed"
+      : "extracted by the model from the raw statement";
+    const entry = a.kind === "design" ? `class ${a.entry_point}` : `${a.entry_point}()`;
+    return { icon: "🔍", text: `Worked out the entry point (${entry}) and ${a.official_case_count} ground-truth test case(s) — ${how}.` };
+  }
+  if (evt.kind === "budget" && evt.status === "ok") {
+    if (!a.max_n) {
+      return { icon: "📐", text: "No input bound stated, so no complexity target could be derived." };
+    }
+    const slow = (a.too_slow || []).length ? ` — ${(a.too_slow || []).join(", ")} would time out` : "";
+    return { icon: "📐", text: `Constraints allow n up to ${Number(a.max_n).toLocaleString()}, so the Coder is told to target ${a.acceptable} or better${slow}.` };
+  }
+  if (evt.kind === "testgen" && evt.status === "ok") {
+    const dropped = a.dropped_count
+      ? ` (${a.dropped_count} discarded for violating the constraints)` : "";
+    if (!a.kept_count) return { icon: "🧪", text: `No extra test cases were generated${dropped}.` };
+    return { icon: "🧪", text: `Generated ${a.kept_count} extra edge/happy-path case(s) that respect the stated constraints${dropped}.` };
+  }
+  if (evt.kind === "judge" && evt.status === "ok") {
+    const v = a.verdicts || {};
+    const parts = [];
+    if (v.bad_test) parts.push(`${v.bad_test} were bad test case(s), discarded`);
+    if (v.real_bug) parts.push(`${v.real_bug} exposed a real bug`);
+    if (v.uncertain) parts.push(`${v.uncertain} were inconclusive`);
+    return { icon: "⚖️", text: `Judge reviewed ${a.disagreement_count} disagreement(s) on generated cases: ${parts.join(", ") || "no verdict"}.` };
+  }
+
   if (evt.kind === "orchestrator" && evt.name === "attempt" && evt.status === "started") {
     const n = a.attempt_no || evt._attemptNo;
     return n === 1
@@ -482,9 +541,17 @@ function narrate(evt) {
       : { icon: "🛡️", text: `Harness runs its own authoritative \`${a["gen_ai.tool.name"]}\` check — the model's word alone is never trusted.` };
   }
   if (evt.kind === "verification" && evt.status === "ok") {
+    // The Tester verifies each tier separately, so this fires twice per
+    // attempt. Only the ground-truth run decides pass/fail; the generated
+    // run is a different (weaker) claim and is narrated as such.
+    if (a.case_tier === "generated") {
+      return a.oracle_passed
+        ? { icon: "🧪", text: "The generated edge cases all agreed with the code too." }
+        : { icon: "🤔", text: `${a.failed_case_count ?? "Some"} generated case(s) disagreed with the code — sending them to the Judge, since a generated case can be wrong itself.` };
+    }
     return a.oracle_passed
-      ? { icon: "✅", text: "Oracle verdict: all test cases passed." }
-      : { icon: "❌", text: `Oracle verdict: ${a.failed_case_count ?? "some"} case(s) failed — this is what gets fed back to the model.` };
+      ? { icon: "✅", text: "Oracle verdict on the ground-truth cases: all passed." }
+      : { icon: "❌", text: `Oracle verdict on the ground-truth cases: ${a.failed_case_count ?? "some"} failed — this is what gets fed back to the model.` };
   }
   if (evt.kind === "skill" && evt.name === "skill_loaded") {
     return { icon: "📘", text: `Loaded the "${a.skill}" technique notes into context (kata category: ${a.kata_category}) — extra know-how the base model doesn't have baked in.` };
@@ -513,6 +580,57 @@ function handleEvent(evt) {
       pushAction(async () => { setStatus("running"); });
       break;
 
+    // ---- Phase 4 prelude: fetch -> extract -> budget -> test-gen ----
+    case "fetch:started":
+      pushAction(async () => { setStatus("running"); setNode("fetch", "active"); });
+      break;
+    case "fetch:ok":
+      pushAction(async () => {
+        setNode("fetch", a.ok === false ? "warn" : "done");
+        await dwell(120);
+      });
+      break;
+
+    case "extract:started":
+      pushAction(async () => { await travel("fetch", "extract"); setNode("extract", "active"); });
+      break;
+    case "extract:ok":
+      pushAction(async () => { setNode("extract", "done"); await dwell(100); });
+      break;
+
+    case "budget:started":
+      pushAction(async () => {
+        // Curated problems skip extraction, so come from whichever ran last.
+        const from = nodeEls.extract && nodeEls.extract.classList.contains("idle") ? "fetch" : "extract";
+        await travel(from, "budget");
+        setNode("budget", "active");
+      });
+      break;
+    case "budget:ok":
+      pushAction(async () => {
+        setNode("budget", a.max_n ? "done" : "warn");
+        await dwell(100);
+      });
+      break;
+
+    case "testgen:started":
+      pushAction(async () => { await travel("budget", "testgen"); setNode("testgen", "active"); });
+      break;
+    case "testgen:ok":
+      pushAction(async () => { setNode("testgen", a.kept_count ? "done" : "warn"); await dwell(100); });
+      break;
+
+    case "judge:started":
+      pushAction(async () => { await travel("oracle", "judge"); setNode("judge", "active"); });
+      break;
+    case "judge:ok":
+      pushAction(async () => {
+        const v = a.verdicts || {};
+        setNode("judge", v.real_bug ? "warn" : "done");
+        await dwell(140);
+      });
+      break;
+
     case "orchestrator:started":
       if (evt.name !== "attempt") break;
       pushAction(async () => {
@@ -522,17 +640,18 @@ function handleEvent(evt) {
         setToolRound(0);
         if (n > 1) {
           retryLoopCount++;
-          const retryFrom = currentMode === "multi" ? "oracle" : "oracle";
-          const retryTo = currentMode === "multi" ? "planner" : "orchestrator";
           // Only the multi-mode "replanned" retry is decided later (by
           // whether Planner actually runs) — in single mode every retry
           // takes this edge, so animate it now.
           if (currentMode === "single") {
             setNode("oracle", "idle");
-            await travel(retryFrom, retryTo);
-            resetNodes();
+            await travel("oracle", "orchestrator");
+            resetSolvingNodes();
             setLoopBadge("retry", `retry ×${retryLoopCount}`);
           }
+        } else if (currentMode === "single") {
+          // First attempt: hand off from the prelude into the solving loop.
+          await travel("testgen", "orchestrator");
         }
         if (currentMode === "single") setNode("orchestrator", "active");
       });
@@ -560,8 +679,11 @@ function handleEvent(evt) {
             retryLoopCount++;
             setNode("oracle", "idle");
             await travel("oracle", "planner");
-            resetNodes();
+            resetSolvingNodes();
             setLoopBadge("retry", `replanned retry ×${retryLoopCount}`);
+          } else {
+            // First attempt: hand off from the prelude into the solving loop.
+            await travel("testgen", "planner");
           }
           setNode("planner", "active");
         } else if (role === "coder") {
@@ -667,6 +789,13 @@ function handleEvent(evt) {
         await travel("sandbox", "oracle");
         setNode("oracle", "active");
         await dwell(150);
+        // Only the ground-truth tier decides the Oracle node's verdict. A
+        // generated case disagreeing is a question for the Judge, not a
+        // failure of the oracle, so it must not paint this node red.
+        if (a.case_tier === "generated") {
+          setNode("oracle", "done");
+          return;
+        }
         setNode("oracle", a.oracle_passed ? "done" : "warn");
         // Update this attempt's log-group badge as soon as its verdict is
         // known, rather than waiting for the whole run to finish — a
@@ -682,7 +811,14 @@ function handleEvent(evt) {
       break;
 
     case "run:ok":
-      pushAction(async () => { modelThink(false); });
+      pushAction(async () => {
+        modelThink(false);
+        // The last LLM call of a run has no following step to mark Provider
+        // done, so it would otherwise be left pulsing after the run ended.
+        if (nodeEls.provider && nodeEls.provider.classList.contains("active")) {
+          setNode("provider", "done");
+        }
+      });
       break;
   }
 }
@@ -961,21 +1097,148 @@ function renderAttempts() {
 // ---------------------------------------------------------------------------
 // Run lifecycle
 // ---------------------------------------------------------------------------
-let katas = [];
 let currentES = null;
 
-async function loadKatas() {
-  const res = await fetch("/katas");
-  katas = await res.json();
-  const sel = document.getElementById("kata-select");
-  sel.innerHTML = katas.map((k) => `<option value="${k.id}">${k.title}</option>`).join("");
-  if (katas.some((k) => k.id === "binary_search")) sel.value = "binary_search";
-  updateKataMeta();
+// ---------------------------------------------------------------------------
+// Problem panel — the question itself, plus everything the harness derived
+// from it before writing a line of code: the entry point it has to implement,
+// what the constraints imply about acceptable complexity, and exactly which
+// test cases it will be graded on (labelled by tier, so it's obvious which
+// ones are ground truth and which were invented).
+// ---------------------------------------------------------------------------
+function renderProblem(p) {
+  // Be explicit about how the oracle was obtained — "parsed from the
+  // statement" and "written by the model" are very different trust levels.
+  const METHOD_LABEL = {
+    curated: "hand-written · offline",
+    deterministic: "parsed from the statement",
+    llm: "model-extracted",
+    "llm-retry": "model-extracted (retried)",
+  };
+  document.getElementById("problem-source").textContent =
+    `${p.source} · ${METHOD_LABEL[p.extraction_method] || p.extraction_method}`;
+
+  const diff = (p.difficulty || "unknown").toLowerCase();
+  const tags = [
+    `<span class="tag-chip ${diff}">${escapeHtml(diff)}</span>`,
+    `<span class="tag-chip kind">${escapeHtml(p.kind)}</span>`,
+    ...(p.topics || []).slice(0, 4).map((t) => `<span class="tag-chip">${escapeHtml(t)}</span>`),
+  ].join("");
+
+  const b = p.budget || {};
+  const budgetCard = b.acceptable && b.acceptable !== "unknown"
+    ? `<div class="budget-card">
+         <div><span class="budget-target">${escapeHtml(b.acceptable)}</span> or better
+           ${b.max_n ? `<span style="color:var(--muted)"> · n up to ${Number(b.max_n).toLocaleString()}</span>` : ""}</div>
+         <div class="budget-why">${escapeHtml(b.reasoning || "")}</div>
+         ${(b.too_slow || []).length ? `<div class="budget-slow">too slow: ${escapeHtml((b.too_slow).join(", "))}</div>` : ""}
+       </div>`
+    : `<div class="budget-card"><div class="budget-why">${escapeHtml(b.reasoning || "No complexity target could be derived.")}</div></div>`;
+
+  const cases = (p.test_cases || []).map((c) => `
+    <tr>
+      <td><span class="tier ${c.source}">${c.source === "generated" ? "gen" : "truth"}</span></td>
+      <td class="val">${escapeHtml(JSON.stringify(c.input))}</td>
+      <td class="val">${escapeHtml(JSON.stringify(c.expected))}</td>
+      <td class="case-rationale">${escapeHtml(c.rationale || "")}</td>
+    </tr>`).join("");
+
+  const truthCount = (p.test_cases || []).filter((c) => c.source !== "generated").length;
+  const genCount = (p.test_cases || []).length - truthCount;
+
+  document.getElementById("problem-body").innerHTML = `
+    <div class="problem-title">${escapeHtml(p.title)}</div>
+    <div class="problem-tags">${tags}
+      ${p.url ? `<a class="problem-link" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">view source ↗</a>` : ""}
+    </div>
+    <div class="statement collapsed" id="statement">${escapeHtml(p.statement_text || "")}</div>
+    <span class="statement-toggle" id="statement-toggle">show full statement</span>
+
+    <div class="section-label">Entry point</div>
+    <pre style="margin:0">${escapeHtml(p.signature || p.starter_code || "—")}</pre>
+
+    ${(p.constraints || []).length ? `
+      <div class="section-label">Constraints</div>
+      <ul class="constraint-list">${p.constraints.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}</ul>` : ""}
+
+    <div class="section-label">Complexity budget (derived)</div>
+    ${budgetCard}
+
+    <div class="section-label">Test cases · ${truthCount} ground truth + ${genCount} generated</div>
+    <table class="cases">
+      <thead><tr><th>tier</th><th>input</th><th>expected</th><th>why</th></tr></thead>
+      <tbody>${cases || `<tr><td colspan="4" class="case-rationale">none</td></tr>`}</tbody>
+    </table>`;
+
+  const stmt = document.getElementById("statement");
+  const toggle = document.getElementById("statement-toggle");
+  toggle.addEventListener("click", () => {
+    stmt.classList.toggle("collapsed");
+    toggle.textContent = stmt.classList.contains("collapsed") ? "show full statement" : "show less";
+  });
+
+  document.getElementById("problem-meta").textContent =
+    `${p.title} · ${diff} · ${p.kind}`;
 }
-function updateKataMeta() {
-  const k = katas.find((k) => k.id === document.getElementById("kata-select").value);
-  if (k) document.getElementById("kata-meta").textContent =
-    `${k.category} · ${k.difficulty} · ${k.test_case_count} test cases`;
+
+// ---------------------------------------------------------------------------
+// Metrics panel — the "what did the harness cost" numbers.
+// ---------------------------------------------------------------------------
+function fmtMs(ms) {
+  if (ms == null) return "—";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function renderMetrics(m, result) {
+  const pct = (v) => (m.wall_ms ? Math.max(0, (v / m.wall_ms) * 100) : 0);
+  const otherMs = Math.max(0, m.wall_ms - m.llm_ms - m.sandbox_ms);
+
+  const agents = Object.entries(m.per_agent || {})
+    .sort((a, b) => b[1].total_tokens - a[1].total_tokens)
+    .map(([role, u]) => `
+      <tr>
+        <td class="role">${escapeHtml(role)}</td>
+        <td>${u.calls}</td>
+        <td>${u.input_tokens.toLocaleString()}</td>
+        <td>${u.output_tokens.toLocaleString()}</td>
+        <td>${fmtMs(u.latency_ms)}</td>
+      </tr>`).join("");
+
+  document.getElementById("metrics-body").innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-value">${fmtMs(m.wall_ms)}</div>
+        <div class="metric-label">wall time</div></div>
+      <div class="metric"><div class="metric-value">${m.attempts}</div>
+        <div class="metric-label">attempts</div>
+        <div class="metric-sub">${result && result.passed ? "solved" : "unsolved"}</div></div>
+      <div class="metric"><div class="metric-value">${m.total_tokens.toLocaleString()}</div>
+        <div class="metric-label">tokens</div>
+        <div class="metric-sub">${m.input_tokens.toLocaleString()} in · ${m.output_tokens.toLocaleString()} out</div></div>
+      <div class="metric highlight"><div class="metric-value">$${m.cost_usd.toFixed(4)}</div>
+        <div class="metric-label">cost</div>
+        <div class="metric-sub">${escapeHtml((m.models_used || []).join(", ") || "—")}</div></div>
+      <div class="metric"><div class="metric-value">${m.llm_calls}</div>
+        <div class="metric-label">llm calls</div>
+        <div class="metric-sub">${m.sandbox_execs} sandbox runs</div></div>
+    </div>
+
+    <div class="section-label">Where the time went</div>
+    <div class="split-bar">
+      <div class="split-seg llm" style="width:${pct(m.llm_ms)}%">${pct(m.llm_ms) > 12 ? "model" : ""}</div>
+      <div class="split-seg sandbox" style="width:${pct(m.sandbox_ms)}%">${pct(m.sandbox_ms) > 12 ? "sandbox" : ""}</div>
+      <div class="split-seg other" style="width:${pct(otherMs)}%">${pct(otherMs) > 12 ? "harness" : ""}</div>
+    </div>
+    <div class="split-key">
+      <span><i style="background:var(--accent)"></i>model ${fmtMs(m.llm_ms)}</span>
+      <span><i style="background:var(--exec)"></i>sandbox ${fmtMs(m.sandbox_ms)}</span>
+      <span><i style="background:#3f4a63"></i>harness ${fmtMs(otherMs)}</span>
+    </div>
+
+    <div class="section-label">Tokens by agent</div>
+    <table class="agents">
+      <thead><tr><th>agent</th><th>calls</th><th>in</th><th>out</th><th>time</th></tr></thead>
+      <tbody>${agents || `<tr><td colspan="5">no model calls</td></tr>`}</tbody>
+    </table>`;
 }
 
 function resetBoard() {
@@ -1008,18 +1271,34 @@ function resetBoard() {
   for (const c of Object.values(conns)) c.el.classList.remove("flowing", "traveled");
   logEl.innerHTML = '<div class="empty">Connecting…</div>';
   document.getElementById("result").innerHTML = '<div class="empty">Running…</div>';
+  document.getElementById("metrics-body").innerHTML = '<div class="empty">Metrics appear when the run finishes.</div>';
   document.getElementById("log-count").textContent = "";
   setAttempt("—");
   setToolRound(0);
 }
 
+function showError(message) {
+  setStatus("failed");
+  document.getElementById("result").innerHTML =
+    `<div class="verdict fail">ERROR<span class="tag">${escapeHtml(String(message))}</span></div>`;
+}
+
 async function solve() {
   const btn = document.getElementById("solve-btn");
+  const ref = document.getElementById("problem-ref").value.trim();
+  if (!ref) {
+    document.getElementById("problem-ref").focus();
+    return;
+  }
+
   btn.disabled = true;
   if (currentES) currentES.close();
   resetBoard();
   const myToken = runToken;
   runConsumer(myToken);
+
+  document.getElementById("problem-body").innerHTML =
+    '<div class="empty">Fetching the problem…</div>';
 
   let runId;
   try {
@@ -1027,23 +1306,25 @@ async function solve() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        kata_id: document.getElementById("kata-select").value,
+        problem_ref: ref,
         max_attempts: parseInt(document.getElementById("max-attempts").value, 10) || 3,
         mode: document.getElementById("mode-select").value,
       }),
     });
+    const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      setStatus("failed");
-      document.getElementById("result").innerHTML =
-        `<div class="verdict fail">ERROR<span class="tag">${err.detail || res.statusText}</span></div>`;
+      showError(payload.detail || res.statusText);
+      document.getElementById("problem-body").innerHTML =
+        `<div class="empty">Could not load that problem: ${escapeHtml(String(payload.detail || res.statusText))}</div>`;
       btn.disabled = false;
       return;
     }
-    runId = (await res.json()).run_id;
+    runId = payload.run_id;
+    // The prepared problem comes back with the run id, so the question and
+    // its derived budget/test cases are on screen before solving starts.
+    if (payload.problem) renderProblem(payload.problem);
   } catch (e) {
-    setStatus("failed");
-    document.getElementById("result").innerHTML = `<div class="verdict fail">ERROR<span class="tag">${e}</span></div>`;
+    showError(e);
     btn.disabled = false;
     return;
   }
@@ -1057,11 +1338,12 @@ async function solve() {
       es.close();
       pushAction(async () => {
         const r = await fetch(`/runs/${runId}`).then((x) => x.json());
-        if (r.status === "done") renderResult(r.result);
-        else if (r.status === "error") {
-          setStatus("failed");
-          document.getElementById("result").innerHTML =
-            `<div class="verdict fail">ERROR<span class="tag">${r.error}</span></div>`;
+        if (r.status === "done") {
+          renderResult(r.result);
+          if (r.metrics) renderMetrics(r.metrics, r.result);
+          if (r.problem) renderProblem(r.problem);
+        } else if (r.status === "error") {
+          showError(r.error);
         }
         btn.disabled = false;
       });
@@ -1072,9 +1354,41 @@ async function solve() {
   es.onerror = () => { es.close(); btn.disabled = false; };
 }
 
-document.getElementById("kata-select").addEventListener("change", updateKataMeta);
+// Preview a problem without solving it — fetch + extract + budget only, so
+// the question can be read (and its derived oracle inspected) up front.
+async function previewProblem(ref) {
+  document.getElementById("problem-body").innerHTML = '<div class="empty">Fetching…</div>';
+  try {
+    const res = await fetch(`/problem?ref=${encodeURIComponent(ref)}&generate_tests=false`);
+    const data = await res.json();
+    if (!res.ok) {
+      document.getElementById("problem-body").innerHTML =
+        `<div class="empty">${escapeHtml(String(data.detail || res.statusText))}</div>`;
+      return;
+    }
+    renderProblem(data);
+  } catch (e) {
+    document.getElementById("problem-body").innerHTML =
+      `<div class="empty">${escapeHtml(String(e))}</div>`;
+  }
+}
+
+const refInput = document.getElementById("problem-ref");
 document.getElementById("solve-btn").addEventListener("click", solve);
-buildBoard("single");
+refInput.addEventListener("keydown", (e) => { if (e.key === "Enter") solve(); });
+// Changing modes reshapes the flowchart, so redraw it before the next run.
+document.getElementById("mode-select").addEventListener("change", () => {
+  currentMode = document.getElementById("mode-select").value;
+  buildBoard(currentMode);
+  resetNodes();
+});
+document.querySelectorAll(".qp").forEach((el) => {
+  el.addEventListener("click", () => {
+    refInput.value = el.dataset.ref;
+    previewProblem(el.dataset.ref);
+  });
+});
+buildBoard(document.getElementById("mode-select").value);
 
 // ---------------------------------------------------------------------------
 // History view (P14 dashboard) — pass rate + retry distribution per kata,
@@ -1140,4 +1454,3 @@ function showView(view) {
 }
 document.getElementById("tab-run").addEventListener("click", () => showView("run"));
 document.getElementById("tab-history").addEventListener("click", () => showView("history"));
-loadKatas();

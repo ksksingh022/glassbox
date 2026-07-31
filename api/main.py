@@ -22,21 +22,27 @@ from fastapi.staticfiles import StaticFiles
 
 from harness.instructions import InstructionBuilder
 from harness.memory.store import AttemptStore
+from harness.metrics import compute as compute_metrics
 from harness.models import Kata, RunResult
 from harness.orchestrator import Orchestrator
 from harness.orchestrator_multi import MultiAgentOrchestrator
+from harness.pipeline import PreparedProblem, ProblemPipeline
 from harness.providers.base import LLMProvider
 from harness.providers.fake import FakeProvider
 from harness.providers.openai_compat import OpenAICompatProvider
 from harness.sandbox.executor import SubprocessSandbox
 from harness.skills.loader import SkillLoader
 from harness.subagents.coder import CoderSubagent
+from harness.subagents.extractor import ProblemExtractor
+from harness.subagents.judge import JudgeSubagent
 from harness.subagents.planner import PlannerSubagent
 from harness.subagents.tester import TesterSubagent
+from harness.subagents.testgen import TestGenSubagent
 from harness.tools.algorithm_hint import AlgorithmHintTool
 from harness.tools.base import ApprovalGate
 from harness.tools.complexity_analysis import AnalyzeComplexityTool
 from harness.tools.docs_lookup import DocsLookupTool
+from harness.tools.fetch_problem import FetchProblemTool
 from harness.tools.run_code import RunCodeTool
 from harness.tools.run_tests import RunTestsTool
 from harness.tools.schemas import RUN_TESTS_SCHEMA
@@ -117,6 +123,7 @@ class _RunEntry:
     task: asyncio.Task
     result: RunResult | None = None
     error: str | None = None
+    prepared: PreparedProblem | None = None
 
 
 _RUNS: dict[str, _RunEntry] = {}
@@ -186,7 +193,9 @@ def _build_single_agent_orchestrator(tracer: Tracer, gate: ApprovalGate) -> Orch
     )
 
 
-def _build_multi_agent_orchestrator(tracer: Tracer, gate: ApprovalGate, run_id: str) -> MultiAgentOrchestrator:
+def _build_multi_agent_orchestrator(
+    tracer: Tracer, gate: ApprovalGate, run_id: str, budget=None
+) -> MultiAgentOrchestrator:
     # The Coder gets the same run_tests tool as the single-agent orchestrator
     # (so its ToolCallLoop can self-check mid-attempt) but oracle precedence
     # (Decision #5) is enforced by the Tester's own authoritative run_tests
@@ -202,6 +211,17 @@ def _build_multi_agent_orchestrator(tracer: Tracer, gate: ApprovalGate, run_id: 
             tracer=tracer, approval_gate=gate,
         ),
         tracer=tracer, skill_loader=_SKILL_LOADER, memory=_MEMORY, session_id=run_id,
+        judge=JudgeSubagent(_PROVIDER, tracer),
+        complexity_budget=budget,
+    )
+
+
+def _build_pipeline(tracer: Tracer, gate: ApprovalGate) -> ProblemPipeline:
+    return ProblemPipeline(
+        fetch_tool=FetchProblemTool(tracer=tracer),
+        extractor=ProblemExtractor(_PROVIDER, tracer),
+        testgen=TestGenSubagent(_PROVIDER, tracer),
+        tracer=tracer, approval_gate=gate,
     )
 
 
@@ -220,32 +240,60 @@ def _record_single_agent_attempts(kata: Kata, run_id: str, result: RunResult) ->
         )
 
 
+@app.get("/problem")
+async def get_problem(ref: str, generate_tests: bool = True):
+    """Fetch + extract + budget (+ optionally generate tests) without solving,
+    so the UI can render the question, its constraints, its derived complexity
+    budget and both test-case tiers before a run starts."""
+    if not ref or not ref.strip():
+        raise HTTPException(status_code=400, detail="ref is required")
+    tracer = Tracer(run_id=uuid.uuid4().hex)
+    gate = ApprovalGate(tracer=tracer, policy=os.environ.get("APPROVAL_POLICY", "auto"))
+    try:
+        prepared = await asyncio.to_thread(
+            _build_pipeline(tracer, gate).prepare, ref, generate_tests
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced to the client verbatim
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return prepared.to_dict()
+
+
 @app.post("/solve")
 async def solve(request: Request):
     body = await request.json()
-    kata_id = body.get("kata_id")
+    # `problem_ref` is the Phase 4 input (LeetCode number/slug/URL, curated
+    # kata id, or pasted text). `kata_id` is still accepted so older clients
+    # and the curated quick-picks keep working unchanged.
+    ref = (body.get("problem_ref") or body.get("problem_text") or body.get("kata_id") or "").strip()
     max_attempts = int(body.get("max_attempts", 3))
     mode = body.get("mode", "single")
+    generate_tests = bool(body.get("generate_tests", True))
     if mode not in ("single", "multi"):
         raise HTTPException(status_code=400, detail="mode must be 'single' or 'multi'")
-    if not kata_id:
-        raise HTTPException(status_code=400, detail="kata_id is required")
+    if not ref:
+        raise HTTPException(status_code=400, detail="problem_ref is required")
 
     client_ip = request.client.host if request.client else "unknown"
     _check_rate_limit(client_ip)
-
-    try:
-        kata = load(kata_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"unknown kata_id: {kata_id}")
 
     run_id = uuid.uuid4().hex
     tracer = Tracer(run_id=run_id)
     tracer.bind_loop(asyncio.get_event_loop())
 
     gate = ApprovalGate(tracer=tracer, policy=os.environ.get("APPROVAL_POLICY", "auto"))
+
+    # Prepare synchronously so a bad reference is a 400 the user sees straight
+    # away, rather than a run that starts and then dies in the background.
+    try:
+        prepared = await asyncio.to_thread(
+            _build_pipeline(tracer, gate).prepare, ref, generate_tests
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    kata = prepared.problem
     orchestrator = (
-        _build_multi_agent_orchestrator(tracer, gate, run_id)
+        _build_multi_agent_orchestrator(tracer, gate, run_id, budget=prepared.budget)
         if mode == "multi" else _build_single_agent_orchestrator(tracer, gate)
     )
 
@@ -266,9 +314,14 @@ async def solve(request: Request):
             tracer.finish()
 
     task = asyncio.create_task(_run())
-    _RUNS[run_id] = _RunEntry(tracer=tracer, task=task)
+    _RUNS[run_id] = _RunEntry(tracer=tracer, task=task, prepared=prepared)
 
-    return {"run_id": run_id, "kata_id": kata_id, "mode": mode}
+    # The prepared problem goes back with the run id so the UI can render the
+    # question immediately, before any solving events arrive.
+    return {
+        "run_id": run_id, "kata_id": kata.id, "mode": mode,
+        "problem": prepared.to_dict(),
+    }
 
 
 @app.get("/trace-stream/{run_id}")
@@ -295,7 +348,16 @@ def get_run(run_id: str):
         return {"status": "error", "error": entry.error}
     if entry.result is None:
         return {"status": "running"}
-    return {"status": "done", "result": dataclasses.asdict(entry.result)}
+    return {
+        "status": "done",
+        "result": dataclasses.asdict(entry.result),
+        # Rolled up from spans the Tracer already emitted — wall time, the
+        # LLM-vs-harness split, tokens per agent, and cost.
+        "metrics": compute_metrics(
+            entry.tracer.events, wall_ms=entry.result.total_duration_ms
+        ).to_dict(),
+        "problem": entry.prepared.to_dict() if entry.prepared else None,
+    }
 
 
 @app.get("/history")

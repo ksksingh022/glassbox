@@ -100,6 +100,25 @@ ANALYZE_COMPLEXITY_SCHEMA = ToolSchema(
     },
 )
 
+FETCH_PROBLEM_SCHEMA = ToolSchema(
+    name="fetch_problem",
+    description=(
+        "Fetch a coding problem's statement, constraints and worked examples "
+        "from a reference: a LeetCode number ('295'), slug, or URL; a curated "
+        "kata id; or pasted problem text."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "string",
+                "description": "Problem reference, e.g. '295', 'two-sum', a leetcode.com URL, or pasted text.",
+            },
+        },
+        "required": ["ref"],
+    },
+)
+
 ALGORITHM_HINT_SCHEMA = ToolSchema(
     name="algorithm_hint",
     description=(

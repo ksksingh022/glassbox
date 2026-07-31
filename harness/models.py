@@ -64,18 +64,38 @@ class Completion:
 
 
 # ---------------------------------------------------------------------------
-# Kata definition (verification input)
+# Problem definition (verification input)
+#
+# Phase 4 generalized the old fixed-kata `Kata` into `Problem`, which can also
+# describe something fetched live from LeetCode. Every field the original
+# 7 curated katas didn't have carries a default, so their JSON files, the
+# loader, and every existing test keep working untouched.
 # ---------------------------------------------------------------------------
+
+# "function" — implement one free function; the oracle calls fn(*args).
+# "design"   — implement a class; the oracle replays an operation sequence
+#              (LeetCode's ["MedianFinder","addNum"], [[],[1]] shape).
+ProblemKind = Literal["function", "design"]
+
+# Where a test case came from — drives the authority ladder in the Tester
+# (see DECISIONS.md): "official"/"curated" are ground truth and set pass/fail,
+# "generated" cases are proposed by the test-gen agent and can only fail a run
+# via a judge verdict, never on their own guessed expected value.
+CaseSource = Literal["official", "generated", "curated"]
 
 
 @dataclass(frozen=True)
 class TestCase:
     input: list[Any]
     expected: Any
+    source: CaseSource = "curated"
+    # Why the generator produced this case ("empty input", "max n boundary").
+    # Empty for official/curated cases, which need no justification.
+    rationale: str = ""
 
 
 @dataclass(frozen=True)
-class Kata:
+class Problem:
     id: str
     title: str
     prompt: str
@@ -84,6 +104,35 @@ class Kata:
     test_cases: list[TestCase]
     category: str
     difficulty: str
+
+    kind: ProblemKind = "function"
+    # Raw fetched statement (LeetCode returns HTML) — rendered in the UI so a
+    # viewer sees the actual question, not just our extraction of it.
+    statement_html: str = ""
+    constraints: list[str] = field(default_factory=list)
+    # Largest input bound found in `constraints`, e.g. 100000 for "n <= 10^5".
+    # Drives ComplexityBudget; None when no bound could be determined.
+    max_n: int | None = None
+    topics: list[str] = field(default_factory=list)
+    starter_code: str = ""
+    source_ref: str = "curated"
+    # Design problems only: the class the solution must define.
+    class_name: str = ""
+
+    @property
+    def official_cases(self) -> list[TestCase]:
+        """Ground-truth cases — the only ones that set pass/fail."""
+        return [tc for tc in self.test_cases if tc.source in ("official", "curated")]
+
+    @property
+    def generated_cases(self) -> list[TestCase]:
+        return [tc for tc in self.test_cases if tc.source == "generated"]
+
+
+# The harness spoke in terms of `Kata` for Phases 1-3 and a lot of code and
+# tests still do; `Problem` is a strict superset, so this alias keeps all of
+# it working rather than forcing a mechanical rename with no behavior change.
+Kata = Problem
 
 
 # ---------------------------------------------------------------------------
@@ -114,18 +163,39 @@ class FailedCase:
 
 
 @dataclass(frozen=True)
+class GeneratedFailure:
+    """A generated (non-ground-truth) case the code disagreed with. Carries
+    the judge's ruling once adjudicated — until then `verdict` is None."""
+    input: list[Any]
+    expected: Any
+    actual: Any
+    rationale: str = ""
+    error: str | None = None
+    verdict: "JudgeVerdictKind | None" = None
+    verdict_reason: str = ""
+
+
+@dataclass(frozen=True)
 class VerificationReport:
     oracle_passed: bool
     score: float
     failed_cases: list[FailedCase]
     advisory_failures: list[str] = field(default_factory=list)
     exec_result: ExecResult | None = None
+    # Generated-case disagreements (tier 3) with their judge verdicts.
+    generated_failures: list[GeneratedFailure] = field(default_factory=list)
+
+    @property
+    def judged_real_bugs(self) -> list[GeneratedFailure]:
+        return [gf for gf in self.generated_failures if gf.verdict == "real_bug"]
 
     @property
     def passed(self) -> bool:
-        # Oracle precedence over everything (Decision #5): advisory failures
-        # can never flip a run the oracle passed.
-        return self.oracle_passed
+        # Oracle precedence (Decision #5) is preserved but now two-tiered:
+        # ground-truth cases must pass, AND no generated case may have been
+        # judged a real bug. A generated case can never fail a run on its own
+        # guessed expected value — only via an explicit `real_bug` verdict.
+        return self.oracle_passed and not self.judged_real_bugs
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +246,7 @@ class RunResult:
 # P12 — Subagents
 # ---------------------------------------------------------------------------
 
-SubagentRole = Literal["planner", "coder", "tester"]
+SubagentRole = Literal["planner", "coder", "tester", "extractor", "testgen", "judge"]
 
 
 @dataclass(frozen=True)
@@ -192,6 +262,8 @@ class SubagentTask:
     failure_feedback: str | None = None
     skill_context: list[str] = field(default_factory=list)
     memory_hint: str | None = None
+    # Phase 4: the Coder is told what Big-O the constraints actually allow.
+    complexity_budget: "ComplexityBudget | None" = None
 
 
 @dataclass(frozen=True)
@@ -222,3 +294,76 @@ class Skill:
     description: str
     triggers: list[str]
     content: str
+
+
+# ---------------------------------------------------------------------------
+# P15 — Problem fetching (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RawProblem:
+    """What a `ProblemSource` returns: the problem as published, before the
+    Extractor turns it into a runnable `Problem`. Deliberately unstructured —
+    fetching and understanding are separate steps so a fetch failure and an
+    extraction failure are distinguishable in the trace."""
+    ref: str                       # what the user typed ("leetcode 295")
+    title: str
+    statement_html: str            # as published (LeetCode returns HTML)
+    statement_text: str            # tag-stripped, for prompting
+    difficulty: str = "unknown"
+    topics: list[str] = field(default_factory=list)
+    starter_code: str = ""         # LeetCode's python3 snippet, if any
+    example_testcases: str = ""    # LeetCode's raw exampleTestcases blob
+    source: str = "unknown"        # "leetcode" | "pasted" | "curated"
+    url: str = ""
+
+
+# ---------------------------------------------------------------------------
+# P17 — Complexity budget (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ComplexityBudget:
+    """What the constraints actually permit. Derived deterministically from
+    the largest input bound — no LLM — and handed to the Coder so it aims at
+    the right algorithm class instead of writing an O(n^2) solution for
+    n = 10^5 and timing out."""
+    max_n: int | None
+    acceptable: str                # "O(n log n)"
+    also_acceptable: list[str] = field(default_factory=list)
+    too_slow: list[str] = field(default_factory=list)
+    reasoning: str = ""
+
+    def as_prompt_line(self) -> str:
+        if self.max_n is None:
+            return (
+                "No explicit input bound was found in the constraints — prefer the "
+                "asymptotically best solution you can reasonably write."
+            )
+        return (
+            f"Input size can reach n = {self.max_n:,}. Target {self.acceptable} or better; "
+            f"{', '.join(self.too_slow)} will be too slow."
+        )
+
+
+# ---------------------------------------------------------------------------
+# P19 — Judge (Phase 4)
+# ---------------------------------------------------------------------------
+
+# Deliberately 3-way. The judge is an LLM and is *not* asked to compute ground
+# truth (that's just re-solving the problem, and it'd be wrong exactly on the
+# hard problems that matter). It only adjudicates a concrete disagreement
+# between the code's output and a *generated* case's guessed expected value:
+#   bad_test  -> the generated case was wrong; discard it (protects correct code)
+#   real_bug  -> the code is genuinely wrong; promote to a hard failure + retry
+#   uncertain -> can't tell; surface as advisory feedback only
+JudgeVerdictKind = Literal["bad_test", "real_bug", "uncertain"]
+
+
+@dataclass(frozen=True)
+class JudgeVerdict:
+    case_index: int
+    verdict: JudgeVerdictKind
+    reason: str

@@ -91,7 +91,11 @@ class Orchestrator:
             while context.attempt_no <= max_attempts and not passed:
                 record = self._attempt(context)
                 context.attempts.append(record)
-                passed = record.report.oracle_passed
+                # `.passed` == `.oracle_passed` on this path (the single-agent
+                # loop has no generated cases and no judge), but using the same
+                # accessor as the multi-agent loop keeps one definition of
+                # "solved" across both orchestrators.
+                passed = record.report.passed
 
         total_duration_ms = (time.monotonic() - start) * 1000
         self._tracer.finish()

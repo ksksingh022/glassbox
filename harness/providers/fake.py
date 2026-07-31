@@ -121,9 +121,46 @@ _EDGE_CASES: dict[str, list[list]] = {
     "merge_intervals": [[[]], [[[1, 1]]]],
 }
 
+# Phase 4 roles. Generated cases carry correct expected values so the normal
+# offline demo stays green; set GLASSBOX_SIMULATE_BAD_TESTCASE=1 to add a
+# deliberately-wrong case, which is how the Judge's "bad_test" path is
+# demoable without a live model (same pattern as GLASSBOX_SIMULATE_SAFETY).
+_GENERATED_CASES: dict[str, list[dict]] = {
+    "binary_search": [
+        {"input": [[], 5], "expected": -1, "kind": "edge", "rationale": "empty array"},
+        {"input": [[1], 1], "expected": 0, "kind": "edge", "rationale": "single element, found"},
+        {"input": [[1, 3, 5], 2], "expected": -1, "kind": "edge", "rationale": "target between elements"},
+        {"input": [[1, 3, 5, 7], 7], "expected": 3, "kind": "happy", "rationale": "last element"},
+    ],
+    "reverse_string": [
+        {"input": [""], "expected": "", "kind": "edge", "rationale": "empty string"},
+        {"input": ["a"], "expected": "a", "kind": "edge", "rationale": "single character"},
+        {"input": ["abc"], "expected": "cba", "kind": "happy", "rationale": "ordinary case"},
+    ],
+    "balanced_brackets": [
+        {"input": [""], "expected": True, "kind": "edge", "rationale": "empty is balanced"},
+        {"input": ["((("], "expected": False, "kind": "edge", "rationale": "unclosed"},
+        {"input": ["()[]"], "expected": True, "kind": "happy", "rationale": "adjacent pairs"},
+    ],
+}
+_BAD_CASE = {
+    "input": [[1, 3, 5, 7, 9, 11], 9], "expected": 99,
+    "kind": "edge", "rationale": "deliberately wrong expected value (demo)",
+}
+
 _KATA_TAG = re.compile(r"KATA_ID:\s*(\S+)")
 _ATTEMPT_TAG = re.compile(r"ATTEMPT:\s*(\d+)")
 _ROLE_TAG = re.compile(r"ROLE:\s*(\S+)")
+# The judge is handed blocks shaped like:
+#   [0] input=[...]
+#        generated test expected: 99
+#        the code returned 4
+# Capture the index and the claimed expected value so the scripted judge can
+# tell the deliberately-wrong demo case apart from a real disagreement.
+_DISAGREEMENT_CASE = re.compile(
+    r"^\s*\[(\d+)\]\s+input=.*?\n\s*generated test expected:\s*(.+)$",
+    re.MULTILINE,
+)
 
 _PLANNER_PLAN = (
     "1. Restate the function signature and what a correct return value looks like.\n"
@@ -166,6 +203,57 @@ class FakeProvider(LLMProvider):
             return Completion(
                 text=text, model_name="fake/scripted-v1",
                 input_tokens=len(blob.split()), output_tokens=len(text.split()),
+                latency_ms=max(latency_ms, 1.0),
+            )
+
+        if role == "testgen":
+            cases = list(_GENERATED_CASES.get(kata_id, []))
+            if os.environ.get("GLASSBOX_SIMULATE_BAD_TESTCASE") and kata_id == "binary_search":
+                cases.append(_BAD_CASE)
+            text = json.dumps(cases)
+            latency_ms = (time.monotonic() - start) * 1000
+            return Completion(
+                text=text, model_name="fake/scripted-v1",
+                input_tokens=len(blob.split()), output_tokens=len(text.split()),
+                latency_ms=max(latency_ms, 1.0),
+            )
+
+        if role == "judge":
+            # Rule `bad_test` only for the deliberately-wrong demo case
+            # (expected 99); anything else is a genuine disagreement this
+            # scripted provider can't actually reason about, so it says
+            # `uncertain` rather than pretending to know. Guessing `bad_test`
+            # everywhere would make the offline demo look like it exonerates
+            # buggy code, which is precisely the failure the judge exists to
+            # avoid.
+            verdicts = []
+            for idx, expected in _DISAGREEMENT_CASE.findall(blob):
+                is_demo_bad_case = expected.strip() == "99"
+                verdicts.append({
+                    "index": int(idx),
+                    "verdict": "bad_test" if is_demo_bad_case else "uncertain",
+                    "reason": (
+                        "the generated expected value contradicts the problem statement"
+                        if is_demo_bad_case else
+                        "scripted provider cannot adjudicate this offline"
+                    ),
+                })
+            text = json.dumps(verdicts)
+            latency_ms = (time.monotonic() - start) * 1000
+            return Completion(
+                text=text, model_name="fake/scripted-v1",
+                input_tokens=len(blob.split()), output_tokens=len(text.split()),
+                latency_ms=max(latency_ms, 1.0),
+            )
+
+        if role == "extractor":
+            # Curated katas skip extraction entirely (they're already fully
+            # formed), so offline there is nothing meaningful to script.
+            text = "{}"
+            latency_ms = (time.monotonic() - start) * 1000
+            return Completion(
+                text=text, model_name="fake/scripted-v1",
+                input_tokens=len(blob.split()), output_tokens=1,
                 latency_ms=max(latency_ms, 1.0),
             )
 

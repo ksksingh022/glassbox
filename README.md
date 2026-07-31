@@ -2,11 +2,27 @@
 
 **Agent = Model + Harness.** The model is a swappable commodity behind one interface (`LLMProvider`). Everything else — instructions, tools, sandbox, verification, orchestration, tracing, UI — is the harness, built by hand in vanilla Python so the whole thing is visible instead of a black box.
 
-All 14 primitives from [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md) are implemented. A single agent solves a coding kata end-to-end — read problem → write code → execute in a sandbox → verify against a deterministic oracle → retry on failure → report — **or** a Planner→Coder→Tester subagent team solves the same kata with structured failure feedback, a bounded context budget, on-demand skill loading, and cross-session memory. Every step is traced live to a browser UI over SSE, in either mode.
+Give it a real problem — `leetcode 295`, a LeetCode URL, or pasted problem text — and the harness fetches it, works out what "correct" and "fast enough" mean for that problem, then solves it. All 19 primitives from [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md) are implemented, and every step is traced live to a browser UI over SSE.
+
+```
+"leetcode 295"
+  ↓  P15 fetch          LeetCode GraphQL / pasted text / curated kata
+  ↓  P16 extract        statement → entry point, constraints, ground-truth cases
+  ↓  P17 budget         "n ≤ 5·10⁴ → target O(n log n); O(n²) will time out"
+  ↓  P18 test-gen       ≤10 extra edge/happy cases that respect the constraints
+  ↓
+ Planner → Coder → Tester ──→ Oracle
+     ↑                          ↓
+     └──── retry w/ feedback ───┤
+                                ↓  P19 judge (only on a generated-case disagreement)
+                          bad test? real bug? unclear?
+```
+
+**The claim this is built to demonstrate:** a small quantized local model can land a LeetCode Hard *because of* the scaffolding around it — the harness works out the acceptable complexity from the constraints and tells the model up front, generates edge cases the published examples don't cover, catches the mistake, and hands back a structured diff to try again. The UI is built to make that legible: the question, the derived oracle, the loop structure, and the exact cost in time, tokens and dollars.
 
 Full build plan: [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md). Design decisions with rationale: [`DECISIONS.md`](DECISIONS.md).
 
-## All 14 primitives
+## All 19 primitives
 
 | # | Primitive | Phase | File |
 |---|---|---|---|
@@ -24,8 +40,21 @@ Full build plan: [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md). Design decision
 | P12 | Subagents (planner / coder / tester) | 2 | [`harness/subagents/`](harness/subagents/), [`harness/tool_loop.py`](harness/tool_loop.py) |
 | P13 | Skills (on-demand SKILL.md loading) | 3 | [`skills/`](skills/), [`harness/skills/loader.py`](harness/skills/loader.py) |
 | P14 | Durable state + memory (cross-session attempt log + recall) | 3 | [`harness/memory/store.py`](harness/memory/store.py) |
+| P15 | Problem fetching (LeetCode / pasted / curated) | 4 | [`harness/problems/`](harness/problems/), [`harness/tools/fetch_problem.py`](harness/tools/fetch_problem.py) |
+| P16 | Extraction (statement → runnable spec + oracle) | 4 | [`harness/subagents/extractor.py`](harness/subagents/extractor.py) |
+| P17 | Complexity budget (constraints → acceptable Big-O) | 4 | [`harness/complexity_budget.py`](harness/complexity_budget.py) |
+| P18 | Test-case generation (constraint-aware edge cases) | 4 | [`harness/subagents/testgen.py`](harness/subagents/testgen.py) |
+| P19 | Judge (adjudicates generated-case disagreements) | 4 | [`harness/subagents/judge.py`](harness/subagents/judge.py) |
 
-`POST /solve {mode: "single" | "multi"}` picks which orchestrator runs — see [DECISIONS.md #9](DECISIONS.md) for why both exist rather than one replacing the other.
+`POST /solve {problem_ref, mode: "single" | "multi"}` picks which orchestrator runs — see [DECISIONS.md #9](DECISIONS.md) for why both exist rather than one replacing the other. `GET /problem?ref=…` runs fetch+extract+budget alone, so the UI can show the question and its derived oracle before solving starts.
+
+### How "correct" and "fast enough" get decided
+
+The interesting part of a dynamic-problem harness isn't the solving — it's that the harness has to **bootstrap its own oracle from an untrusted problem statement**, and then be honest about how much it trusts what it derived.
+
+- **Ground truth comes from the statement, parsed mechanically.** LeetCode publishes the exact signature (its python3 starter snippet) and the correct answer for every worked example. Both are parsed deterministically — for live problems 1, 20, 42 and 295 the entire extraction runs with **no model call**. The LLM is a fallback for pasted/unusual problems, and which route ran is shown in the UI, because "parsed from the statement" and "written by the model" are different trust levels.
+- **Complexity is a table, not an opinion.** `n ≤ 5·10⁴` → target `O(n log n)`, `O(n²)` will time out. Derived deterministically and injected into the Coder's prompt, then cross-checked against the `analyze_complexity` tool.
+- **Generated tests can fail a run, but never on a guess.** The test-gen agent invents ~10 extra constraint-respecting cases, but it doesn't *know* their answers. So a disagreement goes to the Judge, which rules `bad_test` (discard), `real_bug` (retry), or `uncertain` — and defaults to `uncertain` on any silence or garbage. A hallucinated test gets thrown out instead of failing correct code. Full ladder in [DECISIONS.md #23–25](DECISIONS.md).
 
 ### Multi-agent flow (P12)
 
@@ -100,7 +129,7 @@ sequenceDiagram
     participant Or as Oracle
     participant Tr as Tracer
 
-    B->>A: POST /solve {kata_id, max_attempts}
+    B->>A: POST /solve {problem_ref, max_attempts}
     A->>A: create Tracer(run_id), bind to event loop
     A-->>B: {run_id}  (returns immediately)
     A->>O: asyncio.to_thread(orchestrator.solve, kata)
@@ -180,7 +209,14 @@ Run tests:
 pytest tests/ -v
 ```
 
-In the UI, the **mode selector** next to the kata picker redraws the flowchart's node sequence: `single agent` shows Orchestrator→Instructions→Provider→Approval→Tools→Sandbox→Oracle (Phase 1), `multi agent (planner/coder/tester)` shows Planner→Coder→Provider→Approval→Tools→Sandbox→Tester→Oracle instead — Provider/Approval/Tools/Sandbox/Oracle land at the exact same y-position in both layouts, since they're genuinely shared substrate both flows call through. The **History** tab reads `GET /stats` + `GET /history`, backed by the SQLite store at `data/glassbox.db` (gitignored — created on first run).
+In the UI you type a problem reference (or click a quick-pick). Four panels then tell the whole story:
+
+- **Problem** — the fetched statement, its constraints, the **derived complexity budget**, and every test case labelled `truth` vs `gen` with the generator's one-line rationale, so it's obvious what the agent is being graded on and how much that grading is trusted.
+- **Harness** — the flowchart. Fetch→Extract→Budget→Test-gen run once as a prelude; the solving loop follows, with retries and tool-loops drawn as real loop-back arrows carrying live counters.
+- **Cost of solving** — wall time, attempts, tokens in/out, dollar cost, and the **model-vs-sandbox-vs-harness time split**, plus a per-agent token table (planner/coder/tester/testgen/judge).
+- **Story** — the run narrated in plain English, grouped per attempt, with the raw trace one click away.
+
+The **mode selector** redraws the solving half of the flowchart: `single agent` uses Orchestrator→Instructions, `multi agent` uses Planner→Coder→…→Tester→Judge. Provider/Approval/Tools/Sandbox/Oracle are shared substrate in both. The **History** tab reads `GET /stats` + `GET /history`, backed by the SQLite store at `data/glassbox.db` (gitignored — created on first run).
 
 ## The retry story
 
@@ -188,11 +224,31 @@ In the UI, the **mode selector** next to the kata picker redraws the flowchart's
 
 ## Sandbox limits — honestly
 
-`SubprocessSandbox` runs submissions as a fresh `python3` subprocess with `resource.setrlimit` for CPU time and address space, plus a hard wall-clock `timeout` that kills the process if it hangs. This is **not** a hermetic security boundary — it shares the host filesystem and kernel, and `RLIMIT_AS` isn't reliably enforced on macOS (verified in `tests/test_sandbox.py`, where the wall-clock timeout is what actually catches an unbounded-memory loop in practice on this dev machine). It's adequate for running a curated, fixed set of katas with no user-supplied problems (see Decision #2) and for demoing the "sandbox kills bad code" story — it is not adequate for running arbitrary untrusted code from the public internet unmodified. `DockerSandbox` (same `SandboxExecutor` interface, container isolation) is the intended upgrade path, deferred past Phase 1.
+`SubprocessSandbox` runs submissions as a fresh `python3` subprocess with `resource.setrlimit` for CPU time and address space, a hard wall-clock `timeout` that kills the process if it hangs, and a prepended guard that neuters `socket` so submissions can't make network calls.
 
-## Katas
+This is **not** a hermetic security boundary, and the details matter:
 
-Six, in [`harness/verification/katas/`](harness/verification/katas/): `reverse_string` (warm-up), `fizzbuzz_variant` (custom rules, not the classic — a model can't pattern-match its way through), `binary_search` (off-by-one trap, the scripted retry demo under `FakeProvider`), `balanced_brackets` (stack logic), `merge_intervals` (sorting + edge cases), `regex_matching` (LeetCode #10 — hard; `.`/`*` backtracking-DP boundary conditions are genuinely easy for a small local model to get wrong on the first try, so it's the best kata for watching a *real* retry against a live provider like Ollama). All oracles are pure `expected == actual` — no katas with multiple valid outputs, per plan §3.4.
+- It shares the host filesystem and kernel.
+- `RLIMIT_AS` isn't reliably enforced on macOS — the wall-clock timeout is what actually catches an unbounded-memory loop there (verified in `tests/test_sandbox.py`).
+- The network guard is a **guardrail, not a boundary**. It blocks accidental and casual network use by in-process Python; code that deliberately wants out could reimport the C module or spawn a subprocess.
+
+**A correction worth recording:** through Phases 1–3 this README and `DECISIONS.md` both claimed the sandbox had "no network", on the strength of `env={"PATH": ...}`. That was simply wrong — clearing the environment strips inherited *proxy config*, not outbound sockets. It was caught in Phase 4 by actually testing it: a `urllib` call from inside the sandbox reached leetcode.com and returned a 403. Hence the guard, the honest scoping above, and the regression tests. `DockerSandbox` with `--network none` (same `SandboxExecutor` interface, real container isolation) remains the intended upgrade path.
+
+Phase 4 also widened the input surface — problems now come from the public internet — so `LeetCodeSource` enforces a host allowlist (`leetcode.com` only) on every URL it will touch, tested against cloud-metadata and localhost addresses.
+
+## Problem input
+
+Anything the fetcher recognizes:
+
+| input | resolves via |
+|---|---|
+| `295`, `leetcode 295`, `lc 295` | LeetCode number → slug (cached index) |
+| `find-median-from-data-stream` | LeetCode slug |
+| `https://leetcode.com/problems/two-sum/` | LeetCode URL (host-allowlisted) |
+| a pasted problem statement | `PastedTextSource` — always works, no network |
+| `binary_search`, `merge_intervals`, … | the 7 curated katas, fully offline |
+
+The curated katas are kept deliberately: they're the only problems that run with **no network and no API key** (the `FakeProvider` demo), and they're what most of the test suite exercises. `binary_search` is scripted to fail attempt 1 and pass attempt 2, which is how the retry story stays demoable offline.
 
 ## Deployment
 
@@ -203,3 +259,6 @@ Not yet deployed — the plan's exit criteria for both phases include a Railway/
 - **Deployment.** Everything above runs and is verified locally; no Railway/Vercel/Supabase deploy yet (see above).
 - **P14 is SQLite only** (Phase 3a). Postgres/Supabase (3b) isn't done.
 - **Skill/memory events have no dedicated flowchart node.** `skill_loaded`, `memory_write`, and `memory_recall` (P13/P14) narrate in the Story panel with full attrs on click, same as every other event, but don't get their own animated node the way Planner/Coder/Tester do.
+- **LeetCode has no public API contract.** The GraphQL endpoint used by `LeetCodeSource` is undocumented and can change or start blocking at any time. That's the genuinely fragile part of this design — it's why `ProblemSource` is a strategy with `PastedTextSource` as an always-works fallback, and why the problem index is cached to disk. Premium-only problems return no content and fail with a clear message rather than a confusing empty oracle.
+- **The Judge is itself an LLM and can be wrong.** It's bounded — never consulted on ground-truth cases, defaults to `uncertain` on silence or garbage — but a confidently wrong `real_bug` verdict would still cause a spurious retry. Every verdict is traced and rendered so it's auditable rather than invisible.
+- **Extraction quality gates everything downstream.** A bad extraction means a bad oracle. That's why the deterministic path is preferred, why the route taken is labelled in the UI, and why the extracted cases are shown rather than kept internal.

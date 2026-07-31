@@ -23,7 +23,7 @@ ROLE: coder
 Implement exactly the function described below, matching its signature,
 following this plan from the Planner:
 {plan}
-{skill_block}
+{budget_block}{skill_block}
 You have several tools available — use whichever actually help; you don't
 need all of them and some problems need none:
 {tool_list}
@@ -60,19 +60,32 @@ class CoderSubagent(Subagent):
             "\n\nRelevant technique notes (loaded skills):\n" + "\n\n".join(task.skill_context)
             if task.skill_context else ""
         )
+        # The complexity budget is derived from the problem's own stated
+        # constraints (P17) — telling the model the target up front is what
+        # stops it writing an O(n^2) solution for n = 10^5.
+        budget_block = (
+            f"\nPERFORMANCE TARGET: {task.complexity_budget.as_prompt_line()}\n"
+            if task.complexity_budget and task.complexity_budget.acceptable != "unknown" else ""
+        )
+        # Design problems need the class skeleton, not a single def line.
+        entry_hint = (
+            f"Implement the class `{kata.class_name}` exactly as sketched:\n{kata.starter_code or kata.function_signature}"
+            if kata.kind == "design"
+            else f"Function signature:\n{kata.function_signature}"
+        )
         tool_schemas = [schema for _, schema in self._registry.values()]
         tool_list = "\n".join(f"  - `{s.name}`: {s.description}" for s in tool_schemas) or "  (none offered this run)"
 
         messages = [
             Message(role="system", content=_SYSTEM_TEMPLATE.format(
                 kata_id=kata.id, attempt_no=task.attempt_no, plan=plan_text,
-                skill_block=skill_block, tool_list=tool_list,
+                budget_block=budget_block, skill_block=skill_block, tool_list=tool_list,
             )),
             Message(role="user", content=(
                 f"Title: {kata.title}\n"
                 f"Category: {kata.category} · Difficulty: {kata.difficulty}\n\n"
                 f"{kata.prompt}\n\n"
-                f"Function signature:\n{kata.function_signature}"
+                f"{entry_hint}"
             )),
         ]
         if task.failure_feedback:
@@ -83,6 +96,9 @@ class CoderSubagent(Subagent):
             attrs={
                 "role": "coder", "kata_id": kata.id, "attempt_no": task.attempt_no,
                 "plan_step_count": len(task.plan_steps), "skills_loaded": len(task.skill_context),
+                "complexity_target": (
+                    task.complexity_budget.acceptable if task.complexity_budget else "unknown"
+                ),
             },
         ) as span:
             loop = ToolCallLoop(

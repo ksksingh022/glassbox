@@ -41,11 +41,37 @@ def _limit_resources(mem_limit_mb: int, cpu_limit_s: int) -> None:
         pass
 
 
+# Prepended to every sandboxed script. Clearing the environment does NOT stop
+# outbound connections — it only strips inherited proxy config — so without
+# this a submission could genuinely reach the internet (verified: a urllib
+# call from inside the sandbox reached leetcode.com and got a 403 back).
+#
+# Honest scope: this is a **guardrail, not a security boundary**. It stops
+# accidental and casual network use by in-process Python, which is the actual
+# risk profile here (LLM-written solutions to coding problems). Code that
+# deliberately wants out can still reimport the C module or spawn a
+# subprocess. A real boundary needs OS-level isolation — a network namespace
+# on Linux, or `DockerSandbox` with `--network none` (see Decision #6).
+_NETWORK_GUARD = '''
+import socket as _s
+def _blocked(*_a, **_k):
+    raise OSError("network access is disabled in the Glassbox sandbox")
+class _NoSocket(_s.socket):
+    def __init__(self, *_a, **_k):
+        _blocked()
+_s.socket = _NoSocket
+_s.create_connection = _blocked
+_s.create_server = _blocked
+_s.getaddrinfo = _blocked
+del _s
+'''
+
+
 class SubprocessSandbox(SandboxExecutor):
     def execute(self, code: str, timeout_s: float, mem_limit_mb: int) -> ExecResult:
         with tempfile.TemporaryDirectory(prefix="glassbox-sbx-") as tmpdir:
             script_path = Path(tmpdir) / "submission.py"
-            script_path.write_text(code)
+            script_path.write_text(_NETWORK_GUARD + code)
 
             start = time.monotonic()
             timed_out = False

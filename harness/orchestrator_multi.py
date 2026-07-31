@@ -16,14 +16,16 @@ Strategy choice, not the only valid one; it's documented in DECISIONS.md.
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass, field
 
 from harness.context.failure_formatter import FailureFormatter
 from harness.memory.store import AttemptStore
-from harness.models import AttemptRecord, Kata, RunResult, SubagentTask
+from harness.models import AttemptRecord, ComplexityBudget, Kata, RunResult, SubagentTask
 from harness.skills.loader import SkillLoader
 from harness.subagents.coder import CoderSubagent
+from harness.subagents.judge import JudgeSubagent
 from harness.subagents.planner import PlannerSubagent
 from harness.subagents.tester import TesterSubagent
 from harness.tracing.tracer import Tracer
@@ -54,6 +56,8 @@ class MultiAgentOrchestrator:
         memory: AttemptStore | None = None,
         failure_formatter: FailureFormatter | None = None,
         session_id: str | None = None,
+        judge: JudgeSubagent | None = None,
+        complexity_budget: ComplexityBudget | None = None,
     ):
         self._planner = planner
         self._coder = coder
@@ -63,6 +67,8 @@ class MultiAgentOrchestrator:
         self._memory = memory
         self._formatter = failure_formatter or FailureFormatter()
         self._session_id = session_id or tracer.run_id
+        self._judge = judge
+        self._budget = complexity_budget
 
     def solve(self, kata: Kata, max_attempts: int = 3) -> RunResult:
         run_id = self._tracer.run_id
@@ -78,7 +84,10 @@ class MultiAgentOrchestrator:
             while context.attempt_no <= max_attempts and not passed:
                 record = self._attempt(context, memory_hint)
                 context.attempts.append(record)
-                passed = record.report.oracle_passed
+                # `.passed` rather than `.oracle_passed`: ground-truth cases
+                # must pass AND no generated case may have been judged a real
+                # bug (see the authority ladder in DECISIONS.md).
+                passed = record.report.passed
                 self._write_memory(context, record, passed)
 
         total_duration_ms = (time.monotonic() - start) * 1000
@@ -122,26 +131,41 @@ class MultiAgentOrchestrator:
             coder_task = SubagentTask(
                 kata=context.kata, attempt_no=attempt_no, plan_steps=context.plan_steps,
                 failure_feedback=last_failure_text, skill_context=skill_context,
+                complexity_budget=self._budget,
             )
             coder_result = self._coder.run(coder_task)
 
             tester_task = SubagentTask(kata=context.kata, attempt_no=attempt_no, code=coder_result.code)
             tester_result = self._tester.run(tester_task)
+            report = self._adjudicate(context.kata, coder_result.code, tester_result.report)
 
-            if tester_result.report.oracle_passed:
+            if report.passed:
                 context.consecutive_coder_failures = 0
             else:
                 context.consecutive_coder_failures += 1
 
-            attempt_span.set_attr("oracle_passed", tester_result.report.oracle_passed)
-            attempt_span.set_attr("score", tester_result.report.score)
-            attempt_span.set_attr("advisory_failure_count", len(tester_result.advisory_failures))
+            attempt_span.set_attr("oracle_passed", report.oracle_passed)
+            attempt_span.set_attr("passed", report.passed)
+            attempt_span.set_attr("score", report.score)
+            attempt_span.set_attr("advisory_failure_count", len(report.advisory_failures))
+            attempt_span.set_attr("generated_disagreements", len(report.generated_failures))
+            attempt_span.set_attr("judged_real_bugs", len(report.judged_real_bugs))
             attempt_span.set_attr("consecutive_coder_failures", context.consecutive_coder_failures)
 
             return AttemptRecord(
                 attempt_no=attempt_no, code=coder_result.code,
-                completion=coder_result.completion, report=tester_result.report,
+                completion=coder_result.completion, report=report,
             )
+
+    def _adjudicate(self, problem, code: str, report):
+        """Hand generated-case disagreements to the Judge (P19). Skipped
+        entirely when there's no judge or nothing disagreed — the judge is
+        never consulted about ground-truth cases, only about the invented
+        ones whose expected values might themselves be wrong."""
+        if self._judge is None or not report.generated_failures:
+            return report
+        judged = self._judge.adjudicate(problem, code, report.generated_failures)
+        return dataclasses.replace(report, generated_failures=judged)
 
     def _write_memory(self, context: MultiAgentRunContext, record: AttemptRecord, passed: bool) -> None:
         if self._memory is None:

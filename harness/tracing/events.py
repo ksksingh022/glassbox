@@ -26,6 +26,12 @@ SpanKind = Literal[
     "context",      # P11 — ContextManager.fit() budget math
     "skill",        # P13 — a SKILL.md loaded into a subagent's context
     "memory",       # P14 — a durable attempt-log write or a recall hint
+    # Phase 4 additions
+    "fetch",        # P15 — fetching a problem statement from a source
+    "extract",      # P16 — turning a raw statement into a runnable Problem
+    "budget",       # P17 — complexity budget derived from constraints
+    "testgen",      # P18 — generated edge/happy cases
+    "judge",        # P19 — verdict on a generated-case disagreement
 ]
 
 
