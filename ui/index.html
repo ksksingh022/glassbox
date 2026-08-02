@@ -4,146 +4,236 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Glassbox — Coding Agent Harness</title>
+<link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+<link rel="preload" href="fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
-    <span class="logo" aria-hidden="true"></span>
-    <div>
-      <h1>Glassbox</h1>
-      <p>a small model + a real harness, solving problems it couldn't solve alone</p>
-    </div>
-  </div>
-  <div class="run-controls">
-    <input id="problem-ref" type="text" placeholder="leetcode 295, a URL, or paste a problem…" autocomplete="off" />
-    <select id="mode-select" aria-label="orchestration mode">
-      <option value="multi">multi agent</option>
-      <option value="single">single agent</option>
-    </select>
-    <label class="attempts">attempts
-      <input id="max-attempts" type="number" min="1" max="6" value="3" />
-    </label>
-    <button id="solve-btn"><span class="btn-dot"></span> Solve</button>
-  </div>
-  <div class="view-tabs">
-    <button id="tab-run" class="tab active">Live run</button>
-    <button id="tab-history" class="tab">History</button>
-  </div>
-</header>
 
-<div class="quickpicks">
-  <span class="qp-label">try:</span>
-  <span class="qp" data-ref="1">LC 1 · Two Sum</span>
-  <span class="qp" data-ref="20">LC 20 · Valid Parentheses</span>
-  <span class="qp" data-ref="42">LC 42 · Trapping Rain Water <i>hard</i></span>
-  <span class="qp" data-ref="295">LC 295 · Median from Data Stream <i>hard</i></span>
-  <span class="qp offline" data-ref="binary_search">binary_search <i>offline</i></span>
-  <span class="qp offline" data-ref="merge_intervals">merge_intervals <i>offline</i></span>
+<!-- ═══════════ atmosphere: drifting light field + film grain ═══════════ -->
+<div class="ambient" aria-hidden="true">
+  <span class="orb orb-a"></span>
+  <span class="orb orb-b"></span>
+  <span class="orb orb-c"></span>
 </div>
+<div class="grain" aria-hidden="true"></div>
 
-<div class="status-strip">
-  <span id="status-pill" class="pill idle">idle</span>
-  <span class="meta" id="problem-meta"></span>
-  <span class="spacer"></span>
-  <span class="attempt-counter" id="attempt-counter">attempt <b>—</b></span>
-  <span class="tool-round hidden" id="tool-round"></span>
+<div class="shell">
+
+  <!-- ═══════════ left rail ═══════════ -->
+  <nav class="rail" aria-label="views">
+    <a class="rail-logo" href="#" aria-label="Glassbox"><span class="mark"></span></a>
+
+    <div class="rail-group">
+      <button class="rail-btn active" data-view="run" aria-label="Live run">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12h4l3 8 4-16 3 8h4"/>
+        </svg>
+        <span class="rail-tip">Live run</span>
+      </button>
+      <button class="rail-btn" data-view="history" aria-label="History">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4"/><path d="M12 7v5l3.5 2"/>
+        </svg>
+        <span class="rail-tip">History</span>
+      </button>
+      <button class="rail-btn" data-view="about" aria-label="Primitives">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/>
+          <rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>
+        </svg>
+        <span class="rail-tip">Primitives</span>
+      </button>
+    </div>
+
+    <div class="rail-foot">
+      <button class="rail-btn wire" id="wire-chip" aria-label="provider">
+        <span class="wire-dot"></span>
+        <span class="rail-tip" id="wire-tip">checking…</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ═══════════ main column ═══════════ -->
+  <div class="main">
+
+    <!-- ── command bar ── -->
+    <header class="cmdbar">
+      <div class="brand">
+        <h1>Glassbox</h1>
+      </div>
+      <span class="cmd-div run-only" aria-hidden="true"></span>
+
+      <div class="cmd-field run-only">
+        <svg class="cmd-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m4 17 6-5-6-5"/><path d="M12 19h8"/>
+        </svg>
+        <input id="problem-ref" type="text" autocomplete="off" spellcheck="false"
+               placeholder="leetcode 295   ·   a LeetCode URL   ·   or paste a whole problem statement" />
+        <kbd class="cmd-kbd">⏎</kbd>
+      </div>
+
+      <div class="seg run-only" id="mode-seg" role="radiogroup" aria-label="orchestration mode">
+        <span class="seg-thumb" id="seg-thumb"></span>
+        <button type="button" data-mode="multi" class="on" role="radio" aria-checked="true">Multi</button>
+        <button type="button" data-mode="single" role="radio" aria-checked="false">Single</button>
+      </div>
+
+      <div class="stepper run-only" title="max attempts">
+        <button type="button" id="att-minus" aria-label="fewer attempts">−</button>
+        <span id="att-value">3</span>
+        <button type="button" id="att-plus" aria-label="more attempts">+</button>
+      </div>
+
+      <button id="solve-btn" class="cta run-only">
+        <span class="cta-sheen" aria-hidden="true"></span>
+        <svg class="cta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 14 9-14 9V3z"/></svg>
+        <span id="solve-label">Solve</span>
+      </button>
+    </header>
+
+    <!-- ── quick picks ── -->
+    <div class="picks" id="picks">
+      <button class="pick" data-ref="1"><b>LC 1</b> Two Sum<i class="lvl easy">easy</i></button>
+      <button class="pick" data-ref="20"><b>LC 20</b> Valid Parentheses<i class="lvl easy">easy</i></button>
+      <button class="pick" data-ref="42"><b>LC 42</b> Trapping Rain Water<i class="lvl hard">hard</i></button>
+      <button class="pick" data-ref="295"><b>LC 295</b> Median from Data Stream<i class="lvl hard">hard</i></button>
+      <span class="pick-div"></span>
+      <button class="pick" data-ref="binary_search">binary_search<i class="lvl off">offline</i></button>
+      <button class="pick" data-ref="merge_intervals">merge_intervals<i class="lvl off">offline</i></button>
+      <button class="pick" data-ref="regex_matching">regex_matching<i class="lvl off">offline</i></button>
+    </div>
+
+    <!-- ═══════════ LIVE RUN ═══════════ -->
+    <main class="view workspace" id="view-run">
+
+      <section class="panel pipeline">
+        <div class="panel-top">
+          <div class="panel-id">
+            <h2>Harness pipeline</h2>
+            <p id="problem-meta">no problem loaded</p>
+          </div>
+          <span class="mode-badge" id="mode-badge">multi-agent</span>
+        </div>
+
+        <!-- live vitals, adjacent to what they describe -->
+        <div class="vitals" id="vitals">
+          <span class="vital status idle" id="status-pill"><i></i>idle</span>
+          <span class="vsep"></span>
+          <span class="vital"><em>attempt</em><b id="stat-attempt">—</b></span>
+          <span class="vital"><em>round</em><b id="stat-round">—</b></span>
+          <span class="vital"><em>elapsed</em><b id="stat-elapsed">—</b></span>
+          <span class="vital"><em>tokens</em><b id="stat-tokens">—</b></span>
+          <span class="vital hero"><em>cost</em><b id="stat-cost">—</b></span>
+          <span class="vgrow"></span>
+          <span class="vital model" id="model-vital">
+            <i class="model-dot" id="model-dot"></i>
+            <b id="model-name">swappable LLM</b>
+            <em id="model-stat"></em>
+          </span>
+        </div>
+
+        <div class="stage">
+          <svg id="board" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness pipeline diagram">
+            <defs>
+              <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+                <circle cx="1.2" cy="1.2" r="1.2" fill="rgba(255,255,255,0.055)"/>
+              </pattern>
+              <radialGradient id="dotFade" cx="50%" cy="50%" r="62%">
+                <stop offset="0%" stop-color="#fff" stop-opacity="0.9"/>
+                <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+              </radialGradient>
+              <mask id="dotMask"><rect width="100%" height="100%" fill="url(#dotFade)"/></mask>
+              <filter id="bloom" x="-60%" y="-60%" width="220%" height="220%">
+                <feGaussianBlur stdDeviation="7" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <g id="defs-dyn"></g>
+            </defs>
+            <rect class="board-dots" width="100%" height="100%" fill="url(#dots)" mask="url(#dotMask)"/>
+            <g id="bands"></g>
+            <g id="conns"></g>
+            <g id="loop-badges"></g>
+            <g id="nodes"></g>
+            <g id="comet" class="comet hidden"></g>
+          </svg>
+        </div>
+
+        <div class="legend">
+          <span class="lg"><i class="sw idle"></i>idle</span>
+          <span class="lg"><i class="sw active"></i>running</span>
+          <span class="lg"><i class="sw exec"></i>executing</span>
+          <span class="lg"><i class="sw done"></i>done</span>
+          <span class="lg"><i class="sw skip"></i>nothing to do</span>
+          <span class="lg"><i class="sw warn"></i>failed</span>
+          <span class="lgrow"></span>
+          <span class="lg"><i class="ln retry"></i>retry loop</span>
+          <span class="lg"><i class="ln sameplan"></i>same-plan retry</span>
+          <span class="lg"><i class="ln toolloop"></i>model asked again</span>
+        </div>
+      </section>
+
+      <!-- ── detail rail ── -->
+      <aside class="panel detail">
+        <div class="tabs" role="tablist">
+          <span class="tab-ink" id="tab-ink"></span>
+          <button class="tab active" data-tab="story" role="tab">Story<span class="tab-badge" id="tab-badge-story"></span></button>
+          <button class="tab" data-tab="problem" role="tab">Problem</button>
+          <button class="tab" data-tab="result" role="tab">Result<span class="tab-badge" id="tab-badge-result"></span></button>
+          <button class="tab" data-tab="cost" role="tab">Cost</button>
+        </div>
+        <div class="panes">
+          <div class="pane active" id="pane-story">
+            <div id="log"><div class="blank"><span class="blank-glyph">◐</span><b>Nothing running yet</b><p>Pick a problem and hit Solve. Every trace event gets narrated here, grouped by attempt.</p></div></div>
+          </div>
+          <div class="pane" id="pane-problem">
+            <div id="problem-body"><div class="blank"><span class="blank-glyph">◇</span><b>No problem loaded</b><p>Choose one above to see the question and the oracle the harness derives from it.</p></div></div>
+          </div>
+          <div class="pane" id="pane-result">
+            <div id="result"><div class="blank"><span class="blank-glyph">◈</span><b>No verdict yet</b><p>Attempts, their diffs and the final result land here.</p></div></div>
+          </div>
+          <div class="pane" id="pane-cost">
+            <div id="metrics-body"><div class="blank"><span class="blank-glyph">◎</span><b>No metrics yet</b><p>Time, tokens and dollars are rolled up when the run finishes.</p></div></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- ═══════════ HISTORY ═══════════ -->
+    <main class="view scroller hidden" id="view-history">
+      <div class="page">
+        <header class="page-head">
+          <h1>Durable attempt log</h1>
+          <p>P14 — every attempt from every run, written to SQLite on disk. Survives a process restart, and is what the Coder's mid-run recall hint reads from.</p>
+        </header>
+        <div id="history-kpis" class="kpis"></div>
+        <section class="panel glass">
+          <div class="panel-top"><div class="panel-id"><h2>Per-problem pass rate</h2></div></div>
+          <div id="stats-grid" class="stats-grid"></div>
+        </section>
+        <section class="panel glass">
+          <div class="panel-top">
+            <div class="panel-id"><h2>Recent attempts</h2></div>
+            <input id="history-filter" class="mini-input" type="text" placeholder="filter…" />
+          </div>
+          <div id="history-table" class="table-wrap"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- ═══════════ PRIMITIVES ═══════════ -->
+    <main class="view scroller hidden" id="view-about">
+      <div class="page">
+        <header class="page-head">
+          <h1>The 19 primitives</h1>
+          <p>The model is a swappable commodity behind one interface. Everything else on this page is the harness — hand-built in vanilla Python so none of it is a black box.</p>
+        </header>
+        <div id="primitive-grid" class="prim-grid"></div>
+      </div>
+    </main>
+
+  </div>
 </div>
-
-<main class="layout" id="view-run">
-  <!-- ---------- the question ---------- -->
-  <section class="panel problem-panel">
-    <div class="panel-head">
-      <h2>Problem</h2>
-      <span class="hint" id="problem-source"></span>
-    </div>
-    <div id="problem-body"><div class="empty">Enter a problem reference above, or pick one from the list.</div></div>
-  </section>
-
-  <!-- ---------- what the harness did ---------- -->
-  <section class="panel stage-panel">
-    <div class="panel-head">
-      <h2>Harness</h2>
-      <span class="hint">loops are real loop-back arrows with live counters · click any node for its input/output</span>
-    </div>
-    <div class="model-strip">
-      <span class="model-dot" id="model-dot"></span>
-      <span class="model-label">MODEL</span>
-      <span class="model-name" id="model-name">swappable LLM</span>
-      <span class="model-stat" id="model-stat"></span>
-    </div>
-    <div class="stage">
-      <svg id="board" viewBox="0 0 740 720" preserveAspectRatio="xMidYMid meet" role="img" aria-label="harness flowchart">
-        <defs>
-          <marker id="arrowMain" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#3b465f"></path>
-          </marker>
-          <marker id="arrowRetry" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"></path>
-          </marker>
-          <marker id="arrowSameplan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"></path>
-          </marker>
-          <marker id="arrowToolloop" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"></path>
-          </marker>
-          <linearGradient id="packetGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#bcd0ff"/>
-            <stop offset="100%" stop-color="#6ea8fe"/>
-          </linearGradient>
-        </defs>
-        <g id="conns"></g>
-        <g id="loop-badges"></g>
-        <g id="nodes"></g>
-        <g id="packet" class="packet hidden">
-          <circle class="packet-halo" r="15"></circle>
-          <circle class="packet-core" r="6" fill="url(#packetGrad)"></circle>
-        </g>
-      </svg>
-    </div>
-    <div class="legend">
-      <span><i class="sw idle"></i> idle</span>
-      <span><i class="sw active"></i> active</span>
-      <span><i class="sw done"></i> done</span>
-      <span><i class="sw warn"></i> failed</span>
-      <span><i class="sw retry"></i> retry loop</span>
-      <span><i class="sw sameplan"></i> same-plan retry</span>
-      <span><i class="sw toolloop"></i> model asked again</span>
-    </div>
-  </section>
-
-  <!-- ---------- the numbers ---------- -->
-  <section class="panel metrics-panel">
-    <div class="panel-head">
-      <h2>Cost of solving</h2>
-      <span class="hint">where the time and tokens actually went</span>
-    </div>
-    <div id="metrics-body"><div class="empty">Metrics appear when the run finishes.</div></div>
-  </section>
-
-  <!-- ---------- the narration ---------- -->
-  <aside class="panel log-panel">
-    <div class="panel-head"><h2>Story</h2><span class="hint" id="log-count"></span></div>
-    <div id="log"><div class="empty">No events yet — pick a problem and hit Solve.</div></div>
-  </aside>
-
-  <!-- ---------- the answer ---------- -->
-  <section class="panel result-panel">
-    <div class="panel-head"><h2>Result</h2><span class="hint">expand any two attempts to compare side by side</span></div>
-    <div id="result"><div class="empty">Attempts and verdict appear here.</div></div>
-  </section>
-</main>
-
-<main class="layout history-layout hidden" id="view-history">
-  <section class="panel history-panel">
-    <div class="panel-head">
-      <h2>History (P14)</h2>
-      <span class="hint">durable attempt log — SQLite, survives a process restart</span>
-    </div>
-    <div id="stats-grid" class="stats-grid"><div class="empty">Loading…</div></div>
-    <div id="history-table"><div class="empty">Loading…</div></div>
-  </section>
-</main>
 
 <script src="app.js"></script>
 </body>

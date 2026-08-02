@@ -58,6 +58,22 @@ if _UI_DIR.exists():
     app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
 
 
+@app.middleware("http")
+async def _no_cache_ui(request: Request, call_next):
+    """Force the browser to revalidate the UI assets on every load.
+
+    Without an explicit `Cache-Control`, browsers fall back to *heuristic*
+    freshness from `Last-Modified` and will happily serve a stale `app.js`
+    against a fresh `index.html` — which shows up as a half-broken page after
+    a redeploy. `no-cache` still allows a 304 on the ETag StaticFiles emits,
+    so this costs a conditional request, not a re-download.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/ui"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/ui/index.html")
@@ -179,6 +195,20 @@ def _kata_summary(kata: Kata) -> dict:
 @app.get("/katas")
 def list_katas():
     return [_kata_summary(k) for k in load_all().values()]
+
+
+@app.get("/meta")
+def get_meta():
+    """What the harness is actually wired to right now — surfaced in the UI so
+    "which model is behind the provider seam" (P1) is never a guess."""
+    is_fake = isinstance(_PROVIDER, FakeProvider)
+    return {
+        "provider": type(_PROVIDER).__name__,
+        "live": not is_fake,
+        "model": "scripted responses" if is_fake else getattr(_PROVIDER, "_model", "unknown"),
+        "base_url": None if is_fake else getattr(_PROVIDER, "_base_url", None),
+        "approval_policy": os.environ.get("APPROVAL_POLICY", "auto"),
+    }
 
 
 def _build_single_agent_orchestrator(tracer: Tracer, gate: ApprovalGate) -> Orchestrator:

@@ -33,7 +33,7 @@ Full build plan: [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md). Design decision
 | P5 | Verification (oracle) | 1 | [`harness/verification/oracle.py`](harness/verification/oracle.py) |
 | P6 | Orchestration (single- and multi-agent) | 1 / 2 | [`harness/orchestrator.py`](harness/orchestrator.py), [`harness/orchestrator_multi.py`](harness/orchestrator_multi.py) |
 | P7 | Tracing (full OTel-flavored conformance + cost) | 1 / 3 | [`harness/tracing/`](harness/tracing/), [`harness/costs.py`](harness/costs.py) |
-| P8 | UI (a fixed flowchart with real loop-back edges + a narrated story feed + History dashboard) | 1 / 3 | [`ui/`](ui/) |
+| P8 | UI (a fixed serpentine flowchart with real loop-back edges + a tabbed story/problem/result/cost rail + History dashboard) | 1 / 3 | [`ui/`](ui/) |
 | P9 | History (per-session attempt state) | 2 | [`harness/context/history.py`](harness/context/history.py) |
 | P10 | Context delivery (structured failure feedback) | 2 | [`harness/context/failure_formatter.py`](harness/context/failure_formatter.py) |
 | P11 | Context management (trimming/compaction) | 2 | [`harness/context/context_manager.py`](harness/context/context_manager.py) |
@@ -46,7 +46,7 @@ Full build plan: [`spec/HARNESS_PLAN.md`](spec/HARNESS_PLAN.md). Design decision
 | P18 | Test-case generation (constraint-aware edge cases) | 4 | [`harness/subagents/testgen.py`](harness/subagents/testgen.py) |
 | P19 | Judge (adjudicates generated-case disagreements) | 4 | [`harness/subagents/judge.py`](harness/subagents/judge.py) |
 
-`POST /solve {problem_ref, mode: "single" | "multi"}` picks which orchestrator runs — see [DECISIONS.md #9](DECISIONS.md) for why both exist rather than one replacing the other. `GET /problem?ref=…` runs fetch+extract+budget alone, so the UI can show the question and its derived oracle before solving starts.
+`POST /solve {problem_ref, mode: "single" | "multi"}` picks which orchestrator runs — see [DECISIONS.md #9](DECISIONS.md) for why both exist rather than one replacing the other. `GET /problem?ref=…` runs fetch+extract+budget alone, so the UI can show the question and its derived oracle before solving starts, and `GET /meta` reports which provider and model are actually wired up right now.
 
 ### How "correct" and "fast enough" get decided
 
@@ -77,7 +77,7 @@ Each subagent call is a `tracer.span("subagent", ...)` carrying only a **distill
 ```mermaid
 flowchart TD
     subgraph Browser
-        UI["ui/app.js<br/>animated graph + inspector"]
+        UI["ui/app.js<br/>serpentine graph + tabbed rail + inspector"]
     end
 
     UI -- "POST /solve" --> API
@@ -171,7 +171,32 @@ A second, smaller wrinkle: a **new** SSE connection to an **already-finished** r
 
 ## The harness visualizer
 
-The UI (`ui/`) is the point of the project: **one fixed flowchart, drawn once per run**, not redrawn per attempt. Two earlier designs both got this wrong — a ring around a central model core made every attempt retrace the same positions (no way to tell which retry was live), and a "one row per attempt" list flattened the loop structure into repeated boxes instead of showing it as a loop. The current design draws the harness as a real flowchart with real loop-back edges: a purple arrow carries the packet from Oracle back up to the top on a retry, a blue arrow carries it from Tester straight back to Coder on a same-plan retry (no replan), and an amber arrow carries it from wherever the model is being asked again (a tool-calling round, the Tester's edge-case sweep) back up to Provider. Each loop edge has a live counter badge (`retry ×2`, `same-plan retry ×1`, `model asked again ×3`) instead of a separate node per occurrence. Alongside the flowchart, the **Story** panel narrates the run in plain English ("Retrying — attempt 2, with the previous failure fed back into the prompt", "Tester ran the official oracle — every case passed") instead of a raw event log — the goal is that a stranger can watch a small quantized model solve a hard problem and understand *why* it worked: which mistake the harness caught, what feedback it gave, and how many tries it took. The narration is grouped by attempt (current expanded, past collapsed), and the full raw trace is still one click away per attempt via a "show raw trace" toggle. Every node/edge/story-line is instrumented by the Tracer (P7) and streamed to the page over SSE; click-to-inspect on any node shows every real call to that primitive across the whole run, most recent first, each labeled with which attempt it happened in.
+The UI (`ui/`) is the point of the project: **one fixed flowchart, drawn once per run**, not redrawn per attempt. Two earlier designs both got this wrong — a ring around a central model core made every attempt retrace the same positions (no way to tell which retry was live), and a "one row per attempt" list flattened the loop structure into repeated boxes instead of showing it as a loop. The current design draws the harness as a real flowchart with real loop-back edges: a violet arrow carries the packet from Oracle back up to the top on a retry, a cyan arrow carries it from Tester straight back to Coder on a same-plan retry (no replan), and an amber arrow carries it from wherever the model is being asked again (a tool-calling round, the Tester's edge-case sweep) back up to Provider. Each loop edge has a live counter badge (`retry ×2`, `same plan ×1`, `asked again ×3`) instead of a separate node per occurrence. Every node/edge/story-line is instrumented by the Tracer (P7) and streamed to the page over SSE; click-to-inspect on any node shows every real call to that primitive across the whole run, most recent first, each labeled with which attempt it happened in.
+
+### Visual design — "optical glass"
+
+The product is named for looking *through* something at a machine working, so the interface is built as an optical instrument rather than a dashboard. Three decisions carry it:
+
+- **The canvas is lit, not flat.** Three large blurred colour fields drift on long, non-coinciding periods behind everything, and every panel is translucent (`backdrop-filter: blur(22px) saturate(1.5)`) with a hairline border and a 1px inset top highlight — so surfaces read as panes of glass lit from above rather than opaque cards on a flat colour. A fine SVG-turbulence grain sits over the whole page at ~3% opacity, which kills gradient banding in the large dark areas and gives them a texture to catch the eye.
+- **Colour carries two independent signals that never compete.** **Hue encodes phase** — a cyan → teal → indigo → violet → amber → emerald spectrum that runs left-to-right through the pipeline, so the diagram is legible as a progression even before you read a single label. **Glow encodes state** — idle / running / executing / done / failed. A node's phase hue never changes; only its light does. Edges are drawn with a gradient from their source hue to their target hue.
+- **Motion is spring-based and directional.** Every duration and curve is a token (`--ease: cubic-bezier(.16,1,.3,1)`, `--ease-spring: cubic-bezier(.34,1.56,.64,1)`), never a browser default. Nodes arrive on a staggered spring; the live node carries a light beam travelling its own perimeter; the packet is a comet with a decaying trail sampled from its recent positions; counters tick rather than snap. All of it collapses under `prefers-reduced-motion`.
+
+Type is self-hosted [Inter](ui/fonts/NOTICE.md) and JetBrains Mono (both OFL, ~88 KB total, vendored so the UI renders identically offline and makes no third-party requests at runtime).
+
+**Layout.** The flowchart is a **serpentine**, not a single column: the prepare phase (P15–P18) runs left-to-right across the top band, then the solving loop runs boustrophedon inside the second band, so each loop-back is a short hop up its own column rather than a long bow around the outside. The two bands are drawn and labelled, so "what the harness derived before writing code" and "what it did to solve it" are visually separate phases.
+
+The board's internal units are chosen so the diagram is *wider* than the panel it sits in (aspect ~2.1 against the stage's ~1.8). That makes it width-bound when scaled to fit, which means the **row pitch — not the panel's height — decides how big a node renders**. Getting this wrong is invisible until you measure it: an earlier 13-row vertical spine, and then a looser 4-row serpentine, both rendered their node titles at **8.2px**. The current geometry renders them at 11px in the same panel. Navigation moved to a slim icon rail so the top of the window is a single command row instead of three stacked bands of chrome, which is where the extra diagram height came from.
+
+**The rest of the run lives in a tabbed rail** rather than five stacked panels competing for the same screen:
+
+- **Story** — the run narrated in plain English ("Retrying — attempt 2, with the previous failure fed back into the prompt", "Tester ran the official oracle — every case passed") instead of a raw event log, grouped by attempt (current expanded, past collapsed), with the full raw trace one click away per group. The goal is that a stranger can watch a small quantized model solve a hard problem and understand *why* it worked.
+- **Problem** — the question, and everything the harness derived from it before writing a line of code: the entry point, the constraints, the complexity budget with its reasoning, and both test-case tiers labelled by trust level.
+- **Result** — the verdict and each attempt's code, syntax-highlighted; expand any two attempts to diff them against each other directly (not just each against its predecessor).
+- **Cost** — wall time, attempts, tokens, dollars, the model-vs-sandbox-vs-harness time split, and tokens per agent.
+
+The tab switches itself to whichever one is currently interesting (Problem on preview, Story while solving, Result when the verdict lands). A **Primitives** view maps all 19 primitives to their files, colour-coded by the same phase spectrum, and the rail's status dot names the model actually sitting behind the provider seam right now (`GET /meta`), so "which model is this" is never a guess.
+
+**The run bar reports the run, not the replay.** The animation queue deliberately paces the diagram — a run that finishes in 44 ms is still watchable — but status, attempt, tool round, elapsed, tokens and cost are driven straight off the event stream, and elapsed is replaced by the harness's own authoritative wall time the moment the stream closes. Otherwise the numbers would describe how long the animation took to play, which is not a fact about anything.
 
 ## Run locally
 
